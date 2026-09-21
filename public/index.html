@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Libro Contable</title>
+
+  <!-- Tipografía (si no hay internet, se usa la fuente del sistema) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="css/estilos.css">
+
+  <!-- Librerías para gráficos y PDF (las sirve el propio servidor desde node_modules) -->
+  <script defer src="/libs/chart/chart.umd.js"></script>
+  <script defer src="/libs/jspdf/jspdf.umd.min.js"></script>
+  <script defer src="/libs/jspdf-autotable/jspdf.plugin.autotable.min.js"></script>
+
+  <!-- Código de la aplicación -->
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <div class="aplicacion">
+
+    <!-- ===== Menú lateral ===== -->
+    <aside class="lateral">
+      <div class="marca">
+        <span class="marca__icono" aria-hidden="true">LC</span>
+        <span class="marca__nombre">Libro Contable</span>
+      </div>
+      <nav class="navegacion" aria-label="Secciones">
+        <button type="button" class="navegacion__boton" data-vista="dashboard">📊 Dashboard</button>
+        <button type="button" class="navegacion__boton" data-vista="registros">📋 Registros</button>
+      </nav>
+    </aside>
+
+    <main class="contenido">
+
+      <!-- ===== Vista: Dashboard ===== -->
+      <section id="vista-dashboard" class="vista" hidden>
+        <header class="vista__encabezado">
+          <div>
+            <h1>Dashboard</h1>
+            <p class="vista__descripcion">Resumen de todos los movimientos registrados.</p>
+          </div>
+        </header>
+
+        <div class="tarjetas">
+          <article class="tarjeta tarjeta--registros">
+            <span class="tarjeta__titulo">Total de registros</span>
+            <strong class="tarjeta__valor" id="res-registros">0</strong>
+          </article>
+          <article class="tarjeta tarjeta--compra">
+            <span class="tarjeta__titulo">Total de compras</span>
+            <strong class="tarjeta__valor" id="res-compras">$ 0</strong>
+          </article>
+          <article class="tarjeta tarjeta--venta">
+            <span class="tarjeta__titulo">Total de ventas</span>
+            <strong class="tarjeta__valor" id="res-ventas">$ 0</strong>
+          </article>
+          <article class="tarjeta tarjeta--gasto">
+            <span class="tarjeta__titulo">Total de gastos</span>
+            <strong class="tarjeta__valor" id="res-gastos">$ 0</strong>
+          </article>
+          <article class="tarjeta tarjeta--total">
+            <span class="tarjeta__titulo">Valor total registrado</span>
+            <strong class="tarjeta__valor" id="res-total">$ 0</strong>
+          </article>
+        </div>
+
+        <div class="cuadricula-paneles">
+          <article class="panel">
+            <h2>Ingresos y egresos</h2>
+            <div class="comparacion">
+              <div class="comparacion__fila">
+                <span>Ingresos (ventas)</span>
+                <strong id="bal-ingresos">$ 0</strong>
+                <div class="comparacion__barra"><span id="barra-ingresos" class="comparacion__relleno comparacion__relleno--venta"></span></div>
+              </div>
+              <div class="comparacion__fila">
+                <span>Egresos (compras y gastos)</span>
+                <strong id="bal-egresos">$ 0</strong>
+                <div class="comparacion__barra"><span id="barra-egresos" class="comparacion__relleno comparacion__relleno--gasto"></span></div>
+              </div>
+            </div>
+            <p class="balance">
+              <span>Balance</span>
+              <strong id="bal-balance">$ 0</strong>
+            </p>
+            <p class="nota">Los movimientos de tipo "Otro" no se cuentan como ingreso ni como egreso.</p>
+          </article>
+
+          <article class="panel">
+            <h2>Distribución por tipo</h2>
+            <div class="grafico">
+              <canvas id="grafico-tipos" aria-label="Gráfico de distribución por tipo de movimiento" role="img"></canvas>
+              <p class="grafico__vacio" id="tipos-vacio" hidden>Aún no hay datos para graficar.</p>
+            </div>
+          </article>
+
+          <article class="panel panel--ancho">
+            <h2>Ingresos y egresos por mes</h2>
+            <div class="grafico grafico--ancho">
+              <canvas id="grafico-meses" aria-label="Gráfico de ingresos y egresos por mes" role="img"></canvas>
+              <p class="grafico__vacio" id="meses-vacio" hidden>Aún no hay datos para graficar.</p>
+            </div>
+          </article>
+
+          <article class="panel panel--ancho">
+            <h2>Movimientos recientes</h2>
+            <ul class="recientes" id="lista-recientes"></ul>
+          </article>
+        </div>
+      </section>
+
+      <!-- ===== Vista: Registros ===== -->
+      <section id="vista-registros" class="vista" hidden>
+        <header class="vista__encabezado">
+          <div>
+            <h1>Registros</h1>
+            <p class="vista__descripcion" id="contador-registros" aria-live="polite"></p>
+          </div>
+          <button type="button" id="boton-agregar" class="boton boton--primario">➕ Agregar registro</button>
+        </header>
+
+        <div class="barra-filtros" role="search">
+          <label class="campo campo--buscar">
+            <span class="campo__etiqueta">🔍 Buscar</span>
+            <input type="search" id="filtro-buscar" placeholder="Nombre, proveedor o categoría" autocomplete="off">
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Tipo</span>
+            <select id="filtro-tipo">
+              <option value="">Todos</option>
+              <option value="compra">Compra</option>
+              <option value="venta">Venta</option>
+              <option value="gasto">Gasto</option>
+              <option value="otro">Otro</option>
+            </select>
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Categoría</span>
+            <select id="filtro-categoria"><option value="">Todas</option></select>
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Desde</span>
+            <input type="date" id="filtro-desde">
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Hasta</span>
+            <input type="date" id="filtro-hasta">
+          </label>
+          <button type="button" id="boton-limpiar" class="boton boton--suave">Limpiar filtros</button>
+        </div>
+
+        <div class="barra-exportar">
+          <label class="campo campo--en-linea">
+            <span class="campo__etiqueta">Exportar</span>
+            <select id="alcance-exportacion">
+              <option value="filtrados">Solo los registros filtrados</option>
+              <option value="todos">Todos los registros</option>
+            </select>
+          </label>
+          <button type="button" id="boton-excel" class="boton boton--excel">📗 Exportar a Excel</button>
+          <button type="button" id="boton-pdf" class="boton boton--pdf">📄 Exportar a PDF</button>
+        </div>
+
+        <div class="totales" id="barra-totales" aria-label="Totales de los registros mostrados"></div>
+
+        <div class="hoja">
+          <table class="tabla" id="tabla-registros">
+            <thead>
+              <tr>
+                <th scope="col" class="celda-indice"><span class="visualmente-oculto">Número de fila</span></th>
+                <th scope="col" class="acciones">Acciones</th>
+                <th scope="col" data-orden="fecha"><button type="button" class="orden">Fecha</button></th>
+                <th scope="col" data-orden="tipo"><button type="button" class="orden">Tipo</button></th>
+                <th scope="col" data-orden="nombre"><button type="button" class="orden">Nombre</button></th>
+                <th scope="col" data-orden="proveedor"><button type="button" class="orden">Proveedor</button></th>
+                <th scope="col" data-orden="categoria"><button type="button" class="orden">Categoría</button></th>
+                <th scope="col" data-orden="cantidad" class="num"><button type="button" class="orden">Cantidad</button></th>
+                <th scope="col" data-orden="valor_unitario" class="num"><button type="button" class="orden">Valor unitario</button></th>
+                <th scope="col" data-orden="valor_total" class="num"><button type="button" class="orden">Valor total</button></th>
+                <th scope="col">Observaciones</th>
+              </tr>
+            </thead>
+            <tbody id="tabla-cuerpo"></tbody>
+            <tfoot id="tabla-pie"></tfoot>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===== Ventana: agregar / editar registro ===== -->
+  <dialog id="dialogo-formulario" class="dialogo" aria-labelledby="titulo-formulario">
+    <form id="formulario-registro" novalidate>
+      <header class="dialogo__encabezado">
+        <h2 id="titulo-formulario">Agregar registro</h2>
+      </header>
+
+      <div class="dialogo__cuerpo formulario">
+        <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="campo-nombre">Nombre del producto o elemento *</label>
+          <input id="campo-nombre" name="nombre" type="text" maxlength="150" autocomplete="off">
+          <small class="campo__error" data-error-de="nombre"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="campo-tipo">Tipo de movimiento *</label>
+          <select id="campo-tipo" name="tipo">
+            <option value="">Elige un tipo</option>
+            <option value="compra">Compra</option>
+            <option value="venta">Venta</option>
+            <option value="gasto">Gasto</option>
+            <option value="otro">Otro</option>
+          </select>
+          <small class="campo__error" data-error-de="tipo"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="campo-fecha">Fecha *</label>
+          <input id="campo-fecha" name="fecha" type="date">
+          <small class="campo__error" data-error-de="fecha"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="campo-proveedor">Proveedor</label>
+          <input id="campo-proveedor" name="proveedor" type="text" maxlength="150" autocomplete="off">
+          <small class="campo__error" data-error-de="proveedor"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="campo-categoria">Categoría</label>
+          <input id="campo-categoria" name="categoria" type="text" maxlength="80" list="lista-categorias" autocomplete="off">
+          <datalist id="lista-categorias"></datalist>
+          <small class="campo__error" data-error-de="categoria"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="campo-cantidad">Cantidad *</label>
+          <input id="campo-cantidad" name="cantidad" type="number" step="any" min="0" inputmode="decimal">
+          <small class="campo__error" data-error-de="cantidad"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="campo-valor-unitario">Valor unitario *</label>
+          <input id="campo-valor-unitario" name="valor_unitario" type="number" step="any" min="0" inputmode="decimal">
+          <small class="campo__error" data-error-de="valor_unitario"></small>
+        </div>
+
+        <div class="campo campo--completo total-calculado">
+          <span class="campo__etiqueta">Valor total (cantidad × valor unitario)</span>
+          <output id="campo-total" for="campo-cantidad campo-valor-unitario">—</output>
+        </div>
+
+        <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="campo-observaciones">Observaciones</label>
+          <textarea id="campo-observaciones" name="observaciones" rows="3" maxlength="500"></textarea>
+          <small class="campo__error" data-error-de="observaciones"></small>
+        </div>
+      </div>
+
+      <footer class="dialogo__pie">
+        <button type="button" id="boton-cancelar-formulario" class="boton boton--suave">Cancelar</button>
+        <button type="submit" id="boton-guardar" class="boton boton--primario">Guardar registro</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- ===== Ventana: confirmar eliminación ===== -->
+  <dialog id="dialogo-confirmar" class="dialogo dialogo--pequeno" aria-labelledby="confirmar-titulo">
+    <form method="dialog">
+      <header class="dialogo__encabezado">
+        <h2 id="confirmar-titulo">Eliminar registro</h2>
+      </header>
+      <div class="dialogo__cuerpo">
+        <p id="confirmar-mensaje"></p>
+      </div>
+      <footer class="dialogo__pie">
+        <button type="submit" value="cancelar" class="boton boton--suave">Cancelar</button>
+        <button type="submit" value="confirmar" id="confirmar-aceptar" class="boton boton--peligro">🗑️ Eliminar</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Mensajes breves (guardado, error, etc.) -->
+  <div id="avisos" class="avisos" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "libro-contable",
+  "version": "1.0.0",
+  "description": "Aplicación sencilla de contabilidad: registros, dashboard, exportación a Excel y PDF",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "ejemplo": "node scripts/datosEjemplo.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "chart.js": "^4.4.4",
+    "exceljs": "^4.4.0",
+    "expo-sqlite": "^57.0.3",
+    "express": "^4.19.2",
+    "jspdf": "^2.5.2",
+    "jspdf-autotable": "^3.8.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
