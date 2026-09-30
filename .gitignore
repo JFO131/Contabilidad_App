@@ -1,4 +1,9 @@
 node_modules/
+mobile/node_modules/
+mobile/android/
+mobile/dist/
+mobile/.expo/
+mobile/.git_bak/
 data/
 .DS_Store
 .expo/
