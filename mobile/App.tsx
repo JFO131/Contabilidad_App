@@ -39,6 +39,7 @@ type Movimiento = {
   tipo: Tipo;
   observaciones: string;
   estado: Estado;
+  numero_factura?: string;
   productos?: Producto[] | string;
 };
 
@@ -58,6 +59,7 @@ type MovimientoImportado = {
   tipo: Tipo;
   observaciones: string;
   estado: Estado;
+  numero_factura?: string;
 };
 
 // Paleta oscura moderna con acentos morados
@@ -120,7 +122,8 @@ async function crearTablas(db: any) {
       fecha TEXT NOT NULL,
       tipo TEXT NOT NULL,
       observaciones TEXT NOT NULL DEFAULT '',
-      estado TEXT NOT NULL DEFAULT 'pendiente'
+      estado TEXT NOT NULL DEFAULT 'pendiente',
+      numero_factura TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS productos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +141,7 @@ async function crearTablas(db: any) {
   try { await db.execAsync("ALTER TABLE movimientos ADD COLUMN estado TEXT NOT NULL DEFAULT 'pendiente';"); } catch {}
   try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN valor_registro REAL NOT NULL DEFAULT 0;'); } catch {}
   try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN libro_id INTEGER NOT NULL DEFAULT 1;'); } catch {}
+  try { await db.execAsync("ALTER TABLE movimientos ADD COLUMN numero_factura TEXT NOT NULL DEFAULT '';"); } catch {}
 
   // Crear libro "Principal" por defecto si no existe ninguno
   const count = (await db.getFirstAsync('SELECT COUNT(*) as n FROM libros')) as { n: number } | null;
@@ -225,7 +229,7 @@ function AppContenido() {
   const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [nuevaCategoria, setNuevaCategoria] = useState('');
   const [formulario, setFormulario] = useState({
-    nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra' as Tipo, observaciones: '',
+    nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra' as Tipo, observaciones: '', numero_factura: '',
   });
 
   // ── Estado de Libros ──────────────────────────────────────────────────────
@@ -294,7 +298,7 @@ function AppContenido() {
 
   // ── Filtros aplicados ─────────────────────────────────────────────────────
   const filtrados = registros.filter((registro) => {
-    const texto = `${registro.nombre} ${registro.proveedor} ${registro.categoria} ${registro.observaciones}`.toLowerCase();
+    const texto = `${registro.nombre} ${registro.proveedor} ${registro.categoria} ${registro.observaciones} ${registro.numero_factura || ''}`.toLowerCase();
     return (
       texto.includes(busqueda.toLowerCase()) &&
       (!tipoFiltro || registro.tipo === tipoFiltro) &&
@@ -345,7 +349,7 @@ function AppContenido() {
     setRegistroValor('');
     setEstado('pendiente');
     setProductos([]);
-    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '' });
+    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '' });
     setPantalla('movimientos');
   }
 
@@ -356,7 +360,12 @@ function AppContenido() {
     setRegistroValor(String(registro.valor_registro || (productosEditables.length ? 0 : registro.valor_total)));
     setEstado(registro.estado || 'pendiente');
     setProductos(productosEditables);
-    setFormulario({ ...registro, cantidad: String(registro.cantidad), valor_unitario: String(registro.valor_unitario) });
+    setFormulario({
+      ...registro,
+      cantidad: String(registro.cantidad),
+      valor_unitario: String(registro.valor_unitario),
+      numero_factura: registro.numero_factura ? String(registro.numero_factura) : '',
+    });
     setPantalla('movimientos');
   }
 
@@ -444,15 +453,31 @@ function AppContenido() {
     const total = valorRegistro + valorTotal;
     const cantidad = productos.length ? cantidadTotal : 1;
     const unitario = productos.length ? valorTotal / cantidadTotal : valorRegistro;
-    const datos = [libroActivo.id, registroNombre.trim(), '', '', cantidad, unitario, total, valorRegistro, formulario.fecha, formulario.tipo, formulario.observaciones.trim(), JSON.stringify(productosValidos), estado];
+    const numFactura = (formulario.numero_factura || '').replace(/[^0-9]/g, '');
+    const datos = [
+      libroActivo.id,
+      registroNombre.trim(),
+      '',
+      '',
+      cantidad,
+      unitario,
+      total,
+      valorRegistro,
+      formulario.fecha,
+      formulario.tipo,
+      formulario.observaciones.trim(),
+      numFactura,
+      JSON.stringify(productosValidos),
+      estado,
+    ];
     if (editando) {
       await db.runAsync(
-        'UPDATE movimientos SET libro_id=?, nombre=?, proveedor=?, categoria=?, cantidad=?, valor_unitario=?, valor_total=?, valor_registro=?, fecha=?, tipo=?, observaciones=?, productos=?, estado=? WHERE id=?',
+        'UPDATE movimientos SET libro_id=?, nombre=?, proveedor=?, categoria=?, cantidad=?, valor_unitario=?, valor_total=?, valor_registro=?, fecha=?, tipo=?, observaciones=?, numero_factura=?, productos=?, estado=? WHERE id=?',
         ...datos, editando
       );
     } else {
       await db.runAsync(
-        'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         ...datos
       );
     }
@@ -462,7 +487,7 @@ function AppContenido() {
     setRegistroValor('');
     setEstado('pendiente');
     setProductos([]);
-    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '' });
+    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '' });
     Alert.alert('¡Guardado!', 'El movimiento se ha registrado correctamente.');
   }
 
@@ -555,9 +580,10 @@ function AppContenido() {
 
     const filas = lista.map((r) => `<tr>
       <td>${htmlSeguro(r.fecha)}</td>
-      <td><strong>${htmlSeguro(r.nombre)}</strong></td>
+      <td><strong>${htmlSeguro(r.nombre)}</strong>${r.numero_factura ? `<br><small style="color:#6d28d9;font-weight:600">Fac #${htmlSeguro(r.numero_factura)}</small>` : ''}</td>
       <td><span class="tipo ${r.tipo}">${htmlSeguro(r.tipo)}</span></td>
       <td><span class="estado ${r.estado}">${r.estado === 'pagado' ? 'Pagado' : 'Pendiente'}</span></td>
+      <td style="text-align:center">${r.numero_factura ? htmlSeguro(r.numero_factura) : '-'}</td>
       <td style="text-align:center">${htmlSeguro(r.cantidad)}</td>
       <td style="text-align:right">${htmlSeguro(dinero(r.valor_unitario))}</td>
       <td style="text-align:right"><strong>${htmlSeguro(dinero(r.valor_total))}</strong></td>
@@ -612,7 +638,7 @@ function AppContenido() {
         <table>
           <thead>
             <tr>
-              <th>Fecha</th><th>Nombre</th><th>Tipo</th><th>Estado</th>
+              <th>Fecha</th><th>Nombre</th><th>Tipo</th><th>Estado</th><th style="text-align:center">Nº Factura</th>
               <th style="text-align:center">Cant</th>
               <th style="text-align:right">Valor unitario</th>
               <th style="text-align:right">Total</th>
@@ -649,6 +675,7 @@ function AppContenido() {
 
     const filasMovimientos = lista.map((r) => ({
       Fecha: r.fecha,
+      'Nº Factura': r.numero_factura || '',
       Nombre: r.nombre,
       Proveedor: r.proveedor,
       'Categoría': r.categoria,
@@ -789,12 +816,16 @@ function AppContenido() {
       valor_total = valor_unitario * cantidad;
     }
 
+    const facturaRaw = buscarCol(['factura', 'n factura', 'no factura', 'numero factura', 'numero de factura', 'num_factura', 'n_factura', 'invoice', 'factura_no', 'fac']);
+    const numero_factura = facturaRaw !== null ? String(facturaRaw).replace(/[^0-9]/g, '') : '';
+
     return {
       nombre,
       proveedor: String(buscarCol(['proveedor', 'cliente', 'tercero']) || '').trim(),
       categoria: String(buscarCol(['categoria', 'rubro', 'grupo']) || '').trim(),
       cantidad, valor_unitario, valor_total, valor_registro: valor_total,
       fecha, tipo, observaciones: String(buscarCol(['observaciones', 'notas', 'nota', 'detalle']) || '').trim(),
+      numero_factura,
       estado: estadoVal,
     };
   }
@@ -805,8 +836,8 @@ function AppContenido() {
       const items = importacionDatos.items;
       for (const m of items) {
         await db.runAsync(
-          'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          libroActivo.id, m.nombre, m.proveedor, m.categoria, m.cantidad, m.valor_unitario, m.valor_total, m.valor_registro, m.fecha, m.tipo, m.observaciones, '[]', m.estado
+          'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          libroActivo.id, m.nombre, m.proveedor, m.categoria, m.cantidad, m.valor_unitario, m.valor_total, m.valor_registro, m.fecha, m.tipo, m.observaciones, m.numero_factura || '', '[]', m.estado
         );
         if (m.categoria) {
           try { await db.runAsync('INSERT INTO categorias (nombre) VALUES (?)', m.categoria); } catch {}
@@ -1183,6 +1214,13 @@ function AppContenido() {
                 ))}
               </View>
 
+              <Campo
+                etiqueta="Número de factura (opcional)"
+                valor={formulario.numero_factura}
+                cambiar={(v) => cambiar('numero_factura', v.replace(/[^0-9]/g, ''))}
+                teclado="numeric"
+              />
+
               <Campo etiqueta="Observaciones / Notas" valor={formulario.observaciones} cambiar={(v) => cambiar('observaciones', v)} multiline />
 
               <Text style={styles.seccionSubtitulo}>Productos secundarios (opcional)</Text>
@@ -1214,7 +1252,7 @@ function AppContenido() {
               )}
               <View style={styles.dosColumnas}>
                 <Boton texto={editando ? 'Guardar Cambios' : 'Registrar Movimiento'} onPress={guardar} principal />
-                <Boton texto="Limpiar" onPress={() => { setRegistroNombre(''); setRegistroValor(''); setProductos([]); setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '' }); }} secundario />
+                <Boton texto="Limpiar" onPress={() => { setRegistroNombre(''); setRegistroValor(''); setProductos([]); setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '' }); }} secundario />
               </View>
             </View>
           </>
@@ -1372,6 +1410,11 @@ function MovimientoCard({
               {registro.tipo.toUpperCase()}
             </Text>
           </View>
+          {!!registro.numero_factura && (
+            <View style={styles.badgeFactura}>
+              <Text style={styles.badgeFacturaTexto}>FAC #{registro.numero_factura}</Text>
+            </View>
+          )}
           <Pressable style={[styles.badgeEstado, pagado ? styles.badgePagado : styles.badgePendiente]} onPress={() => onStatus(registro.id, pagado ? 'pendiente' : 'pagado')}>
             <Text style={[styles.badgeEstadoTexto, pagado ? styles.textVerde : styles.textAmarillo]}>
               {pagado ? '✓ PAGADO' : '⏳ PENDIENTE'}
@@ -1381,7 +1424,12 @@ function MovimientoCard({
         <Text style={[styles.movimientoValor, esVenta ? styles.textVerde : styles.textBlanco]}>{dinero(registro.valor_total)}</Text>
       </View>
       <Text style={styles.movimientoNombre}>{registro.nombre}</Text>
-      <Text style={styles.movimientoDetalle}>{registro.fecha}{registro.proveedor ? ` · ${registro.proveedor}` : ''}{registro.categoria ? ` · ${registro.categoria}` : ''}</Text>
+      <Text style={styles.movimientoDetalle}>
+        {registro.fecha}
+        {registro.numero_factura ? ` · Factura #${registro.numero_factura}` : ''}
+        {registro.proveedor ? ` · ${registro.proveedor}` : ''}
+        {registro.categoria ? ` · ${registro.categoria}` : ''}
+      </Text>
       {!!registro.observaciones && <Text style={styles.movimientoObservaciones} numberOfLines={2}>{registro.observaciones}</Text>}
       <View style={styles.movimientoAcciones}>
         {mostrarDetalles && (
@@ -1566,6 +1614,8 @@ const styles = StyleSheet.create({
   badgeGasto: { backgroundColor: COLORES.rojoFondo, borderWidth: 1, borderColor: COLORES.rojoBorde },
   badgeOtro: { backgroundColor: COLORES.moradoFondo, borderWidth: 1, borderColor: COLORES.moradoBorde },
   badgeTipoTexto: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+  badgeFactura: { backgroundColor: 'rgba(56, 189, 248, 0.15)', borderWidth: 1, borderColor: '#38BDF8', paddingVertical: 3, paddingHorizontal: 8, borderRadius: 8 },
+  badgeFacturaTexto: { color: '#38BDF8', fontSize: 10, fontWeight: '800' },
   badgeEstado: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 8 },
   badgePagado: { backgroundColor: COLORES.verdeFondo },
   badgePendiente: { backgroundColor: COLORES.amarilloFondo },
