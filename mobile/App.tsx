@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 
 type Tipo = 'compra' | 'venta' | 'gasto' | 'otro';
+type ImpactoOtro = 'aumenta' | 'resta';
 type Estado = 'pendiente' | 'pagado';
 type Periodo = 'diario' | 'semanal' | 'mensual' | 'anual' | 'total';
 
@@ -40,6 +41,7 @@ type Movimiento = {
   observaciones: string;
   estado: Estado;
   numero_factura?: string;
+  impacto_otro?: ImpactoOtro | string;
   productos?: Producto[] | string;
 };
 
@@ -60,6 +62,7 @@ type MovimientoImportado = {
   observaciones: string;
   estado: Estado;
   numero_factura?: string;
+  impacto_otro?: ImpactoOtro | string;
 };
 
 // Paleta oscura moderna con acentos morados
@@ -123,7 +126,8 @@ async function crearTablas(db: any) {
       tipo TEXT NOT NULL,
       observaciones TEXT NOT NULL DEFAULT '',
       estado TEXT NOT NULL DEFAULT 'pendiente',
-      numero_factura TEXT NOT NULL DEFAULT ''
+      numero_factura TEXT NOT NULL DEFAULT '',
+      impacto_otro TEXT NOT NULL DEFAULT 'aumenta'
     );
     CREATE TABLE IF NOT EXISTS productos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +146,7 @@ async function crearTablas(db: any) {
   try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN valor_registro REAL NOT NULL DEFAULT 0;'); } catch {}
   try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN libro_id INTEGER NOT NULL DEFAULT 1;'); } catch {}
   try { await db.execAsync("ALTER TABLE movimientos ADD COLUMN numero_factura TEXT NOT NULL DEFAULT '';"); } catch {}
+  try { await db.execAsync("ALTER TABLE movimientos ADD COLUMN impacto_otro TEXT NOT NULL DEFAULT 'aumenta';"); } catch {}
 
   // Crear libro "Principal" por defecto si no existe ninguno
   const count = (await db.getFirstAsync('SELECT COUNT(*) as n FROM libros')) as { n: number } | null;
@@ -229,7 +234,7 @@ function AppContenido() {
   const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [nuevaCategoria, setNuevaCategoria] = useState('');
   const [formulario, setFormulario] = useState({
-    nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra' as Tipo, observaciones: '', numero_factura: '',
+    nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra' as Tipo, observaciones: '', numero_factura: '', impacto_otro: 'aumenta' as ImpactoOtro,
   });
 
   // ── Estado de Libros ──────────────────────────────────────────────────────
@@ -298,7 +303,8 @@ function AppContenido() {
 
   // ── Filtros aplicados ─────────────────────────────────────────────────────
   const filtrados = registros.filter((registro) => {
-    const texto = `${registro.nombre} ${registro.proveedor} ${registro.categoria} ${registro.observaciones} ${registro.numero_factura || ''}`.toLowerCase();
+    const efectoOtro = registro.tipo === 'otro' ? (registro.impacto_otro === 'resta' ? 'resta egreso' : 'aumenta suma ingreso') : '';
+    const texto = `${registro.nombre} ${registro.proveedor} ${registro.categoria} ${registro.observaciones} ${registro.numero_factura || ''} ${efectoOtro}`.toLowerCase();
     return (
       texto.includes(busqueda.toLowerCase()) &&
       (!tipoFiltro || registro.tipo === tipoFiltro) &&
@@ -314,7 +320,11 @@ function AppContenido() {
   const ventas = registros.filter((r) => r.tipo === 'venta').reduce((s, r) => s + r.valor_total, 0);
   const compras = registros.filter((r) => r.tipo === 'compra').reduce((s, r) => s + r.valor_total, 0);
   const gastos = registros.filter((r) => r.tipo === 'gasto').reduce((s, r) => s + r.valor_total, 0);
-  const balance = ventas - compras - gastos;
+  const otrosAumenta = registros.filter((r) => r.tipo === 'otro' && r.impacto_otro !== 'resta').reduce((s, r) => s + r.valor_total, 0);
+  const otrosResta = registros.filter((r) => r.tipo === 'otro' && r.impacto_otro === 'resta').reduce((s, r) => s + r.valor_total, 0);
+  const totalIngresos = ventas + otrosAumenta;
+  const totalEgresos = compras + gastos + otrosResta;
+  const balance = totalIngresos - totalEgresos;
   const cantidadTotal = productos.reduce((s, p) => s + (Number(p.cantidad) || 0), 0);
   const valorTotal = productos.reduce((s, p) => s + ((Number(p.cantidad) || 0) * (Number(p.valor_unitario) || 0)), 0);
 
@@ -335,8 +345,10 @@ function AppContenido() {
   const ventasPeriodo = totalPorTipo(listaPeriodo, 'venta');
   const comprasPeriodo = totalPorTipo(listaPeriodo, 'compra');
   const gastosPeriodo = totalPorTipo(listaPeriodo, 'gasto');
-  const otrosPeriodo = totalPorTipo(listaPeriodo, 'otro');
-  const totalSeleccionado = listaPeriodo.reduce((s, r) => s + r.valor_total, 0);
+  const otrosAumentaPeriodo = listaPeriodo.filter((r) => r.tipo === 'otro' && r.impacto_otro !== 'resta').reduce((s, r) => s + r.valor_total, 0);
+  const otrosRestaPeriodo = listaPeriodo.filter((r) => r.tipo === 'otro' && r.impacto_otro === 'resta').reduce((s, r) => s + r.valor_total, 0);
+  const otrosPeriodoNeto = otrosAumentaPeriodo - otrosRestaPeriodo;
+  const totalPeriodo = (ventasPeriodo + otrosAumentaPeriodo) - (comprasPeriodo + gastosPeriodo + otrosRestaPeriodo);
 
   // ── Helpers de formulario ────────────────────────────────────────────────
   function cambiar(campo: string, valor: string) {
@@ -349,7 +361,7 @@ function AppContenido() {
     setRegistroValor('');
     setEstado('pendiente');
     setProductos([]);
-    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '' });
+    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
     setPantalla('movimientos');
   }
 
@@ -365,6 +377,7 @@ function AppContenido() {
       cantidad: String(registro.cantidad),
       valor_unitario: String(registro.valor_unitario),
       numero_factura: registro.numero_factura ? String(registro.numero_factura) : '',
+      impacto_otro: (registro.impacto_otro === 'resta' ? 'resta' : 'aumenta') as ImpactoOtro,
     });
     setPantalla('movimientos');
   }
@@ -454,6 +467,7 @@ function AppContenido() {
     const cantidad = productos.length ? cantidadTotal : 1;
     const unitario = productos.length ? valorTotal / cantidadTotal : valorRegistro;
     const numFactura = (formulario.numero_factura || '').replace(/[^0-9]/g, '');
+    const impactoOtro = formulario.tipo === 'otro' ? (formulario.impacto_otro === 'resta' ? 'resta' : 'aumenta') : 'aumenta';
     const datos = [
       libroActivo.id,
       registroNombre.trim(),
@@ -467,17 +481,18 @@ function AppContenido() {
       formulario.tipo,
       formulario.observaciones.trim(),
       numFactura,
+      impactoOtro,
       JSON.stringify(productosValidos),
       estado,
     ];
     if (editando) {
       await db.runAsync(
-        'UPDATE movimientos SET libro_id=?, nombre=?, proveedor=?, categoria=?, cantidad=?, valor_unitario=?, valor_total=?, valor_registro=?, fecha=?, tipo=?, observaciones=?, numero_factura=?, productos=?, estado=? WHERE id=?',
+        'UPDATE movimientos SET libro_id=?, nombre=?, proveedor=?, categoria=?, cantidad=?, valor_unitario=?, valor_total=?, valor_registro=?, fecha=?, tipo=?, observaciones=?, numero_factura=?, impacto_otro=?, productos=?, estado=? WHERE id=?',
         ...datos, editando
       );
     } else {
       await db.runAsync(
-        'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, impacto_otro, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         ...datos
       );
     }
@@ -487,7 +502,7 @@ function AppContenido() {
     setRegistroValor('');
     setEstado('pendiente');
     setProductos([]);
-    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '' });
+    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
     Alert.alert('¡Guardado!', 'El movimiento se ha registrado correctamente.');
   }
 
@@ -573,15 +588,16 @@ function AppContenido() {
     const ventasL = lista.filter((r) => r.tipo === 'venta').reduce((s, r) => s + r.valor_total, 0);
     const comprasL = lista.filter((r) => r.tipo === 'compra').reduce((s, r) => s + r.valor_total, 0);
     const gastosL = lista.filter((r) => r.tipo === 'gasto').reduce((s, r) => s + r.valor_total, 0);
-    const otrosL = lista.filter((r) => r.tipo === 'otro').reduce((s, r) => s + r.valor_total, 0);
-    const balanceL = ventasL - comprasL - gastosL;
+    const otrosAumentaL = lista.filter((r) => r.tipo === 'otro' && r.impacto_otro !== 'resta').reduce((s, r) => s + r.valor_total, 0);
+    const otrosRestaL = lista.filter((r) => r.tipo === 'otro' && r.impacto_otro === 'resta').reduce((s, r) => s + r.valor_total, 0);
+    const balanceL = (ventasL + otrosAumentaL) - (comprasL + gastosL + otrosRestaL);
     const descFiltros = describirFiltros(busqueda, tipoFiltro, estadoFiltro, fechaDesde, fechaHasta);
     const libroNombreStr = libroActivo?.nombre ?? 'General';
 
     const filas = lista.map((r) => `<tr>
       <td>${htmlSeguro(r.fecha)}</td>
       <td><strong>${htmlSeguro(r.nombre)}</strong>${r.numero_factura ? `<br><small style="color:#6d28d9;font-weight:600">Fac #${htmlSeguro(r.numero_factura)}</small>` : ''}</td>
-      <td><span class="tipo ${r.tipo}">${htmlSeguro(r.tipo)}</span></td>
+      <td><span class="tipo ${r.tipo}">${r.tipo === 'otro' ? (r.impacto_otro === 'resta' ? 'Otro (-)' : 'Otro (+)') : htmlSeguro(r.tipo)}</span></td>
       <td><span class="estado ${r.estado}">${r.estado === 'pagado' ? 'Pagado' : 'Pendiente'}</span></td>
       <td style="text-align:center">${r.numero_factura ? htmlSeguro(r.numero_factura) : '-'}</td>
       <td style="text-align:center">${htmlSeguro(r.cantidad)}</td>
@@ -632,7 +648,8 @@ function AppContenido() {
           <div class="card"><span>Ventas</span><b>${htmlSeguro(dinero(ventasL))}</b></div>
           <div class="card"><span>Compras</span><b>${htmlSeguro(dinero(comprasL))}</b></div>
           <div class="card"><span>Gastos</span><b>${htmlSeguro(dinero(gastosL))}</b></div>
-          <div class="card"><span>Otros</span><b>${htmlSeguro(dinero(otrosL))}</b></div>
+          <div class="card"><span>Otros (+)</span><b>${htmlSeguro(dinero(otrosAumentaL))}</b></div>
+          <div class="card"><span>Otros (-)</span><b>${htmlSeguro(dinero(otrosRestaL))}</b></div>
           <div class="card balance"><span>Balance neto</span><b>${htmlSeguro(dinero(balanceL))}</b></div>
         </div>
         <table>
@@ -671,7 +688,9 @@ function AppContenido() {
     const ventasL = lista.filter((r) => r.tipo === 'venta').reduce((s, r) => s + r.valor_total, 0);
     const comprasL = lista.filter((r) => r.tipo === 'compra').reduce((s, r) => s + r.valor_total, 0);
     const gastosL = lista.filter((r) => r.tipo === 'gasto').reduce((s, r) => s + r.valor_total, 0);
-    const otrosL = lista.filter((r) => r.tipo === 'otro').reduce((s, r) => s + r.valor_total, 0);
+    const otrosAumentaL = lista.filter((r) => r.tipo === 'otro' && r.impacto_otro !== 'resta').reduce((s, r) => s + r.valor_total, 0);
+    const otrosRestaL = lista.filter((r) => r.tipo === 'otro' && r.impacto_otro === 'resta').reduce((s, r) => s + r.valor_total, 0);
+    const balanceL = (ventasL + otrosAumentaL) - (comprasL + gastosL + otrosRestaL);
 
     const filasMovimientos = lista.map((r) => ({
       Fecha: r.fecha,
@@ -679,7 +698,8 @@ function AppContenido() {
       Nombre: r.nombre,
       Proveedor: r.proveedor,
       'Categoría': r.categoria,
-      Tipo: r.tipo,
+      Tipo: r.tipo === 'otro' ? `Otro (${r.impacto_otro === 'resta' ? 'Resta' : 'Suma'})` : r.tipo,
+      'Efecto': r.tipo === 'venta' || (r.tipo === 'otro' && r.impacto_otro !== 'resta') ? 'Suma (+)' : 'Resta (-)',
       Estado: r.estado === 'pagado' ? 'Pagado' : 'Pendiente',
       Cantidad: r.cantidad,
       'Valor unitario': r.valor_unitario,
@@ -698,8 +718,9 @@ function AppContenido() {
       { Concepto: 'Ventas', Valor: ventasL },
       { Concepto: 'Compras', Valor: comprasL },
       { Concepto: 'Gastos', Valor: gastosL },
-      { Concepto: 'Otros', Valor: otrosL },
-      { Concepto: 'Balance neto', Valor: ventasL - comprasL - gastosL },
+      { Concepto: 'Otros (+ suma)', Valor: otrosAumentaL },
+      { Concepto: 'Otros (- resta)', Valor: otrosRestaL },
+      { Concepto: 'Balance neto', Valor: balanceL },
       { Concepto: 'Fecha de exportación', Valor: hoy() },
     ]);
     XLSX.utils.book_append_sheet(libro, resumen, 'Resumen');
@@ -819,6 +840,12 @@ function AppContenido() {
     const facturaRaw = buscarCol(['factura', 'n factura', 'no factura', 'numero factura', 'numero de factura', 'num_factura', 'n_factura', 'invoice', 'factura_no', 'fac']);
     const numero_factura = facturaRaw !== null ? String(facturaRaw).replace(/[^0-9]/g, '') : '';
 
+    const efectoRaw = String(buscarCol(['efecto', 'impacto', 'signo', 'accion']) || '').toLowerCase();
+    let impacto_otro: ImpactoOtro = 'aumenta';
+    if (efectoRaw.includes('rest') || efectoRaw.includes('egres') || efectoRaw.includes('-') || tipoRaw.includes('resta')) {
+      impacto_otro = 'resta';
+    }
+
     return {
       nombre,
       proveedor: String(buscarCol(['proveedor', 'cliente', 'tercero']) || '').trim(),
@@ -826,6 +853,7 @@ function AppContenido() {
       cantidad, valor_unitario, valor_total, valor_registro: valor_total,
       fecha, tipo, observaciones: String(buscarCol(['observaciones', 'notas', 'nota', 'detalle']) || '').trim(),
       numero_factura,
+      impacto_otro,
       estado: estadoVal,
     };
   }
@@ -836,8 +864,8 @@ function AppContenido() {
       const items = importacionDatos.items;
       for (const m of items) {
         await db.runAsync(
-          'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          libroActivo.id, m.nombre, m.proveedor, m.categoria, m.cantidad, m.valor_unitario, m.valor_total, m.valor_registro, m.fecha, m.tipo, m.observaciones, m.numero_factura || '', '[]', m.estado
+          'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, impacto_otro, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          libroActivo.id, m.nombre, m.proveedor, m.categoria, m.cantidad, m.valor_unitario, m.valor_total, m.valor_registro, m.fecha, m.tipo, m.observaciones, m.numero_factura || '', m.impacto_otro || 'aumenta', '[]', m.estado
         );
         if (m.categoria) {
           try { await db.runAsync('INSERT INTO categorias (nombre) VALUES (?)', m.categoria); } catch {}
@@ -892,16 +920,16 @@ function AppContenido() {
                 <Text style={styles.balanceFecha}>{hoy()}</Text>
               </View>
               <Text style={styles.balanceMonto}>{dinero(balance)}</Text>
-              <Text style={styles.balanceDetalle}>📒 {libroActivo?.nombre ?? '—'}  ·  Total neto: Ventas − Compras − Gastos</Text>
+              <Text style={styles.balanceDetalle}>📒 {libroActivo?.nombre ?? '—'}  ·  Balance neto (Ingresos − Egresos)</Text>
               <View style={styles.balanceIndicadores}>
                 <View style={styles.balanceIndicadorItem}>
-                  <Text style={styles.balanceIndicadorLabel}>Ingresos</Text>
-                  <Text style={styles.balanceIndicadorValorVentas}>+{dinero(ventas)}</Text>
+                  <Text style={styles.balanceIndicadorLabel}>Ingresos (Ventas y Otros +)</Text>
+                  <Text style={styles.balanceIndicadorValorVentas}>+{dinero(totalIngresos)}</Text>
                 </View>
                 <View style={styles.divisorVertical} />
                 <View style={styles.balanceIndicadorItem}>
-                  <Text style={styles.balanceIndicadorLabel}>Gastos & Compras</Text>
-                  <Text style={styles.balanceIndicadorValorGastos}>-{dinero(compras + gastos)}</Text>
+                  <Text style={styles.balanceIndicadorLabel}>Egresos (Gastos y Otros -)</Text>
+                  <Text style={styles.balanceIndicadorValorGastos}>-{dinero(totalEgresos)}</Text>
                 </View>
               </View>
             </View>
@@ -932,7 +960,7 @@ function AppContenido() {
               <TarjetaMetrica titulo="Ventas" valor={ventas} color={COLORES.verde} badge="+" />
               <TarjetaMetrica titulo="Compras" valor={compras} color="#F97316" badge="-" />
               <TarjetaMetrica titulo="Gastos" valor={gastos} color={COLORES.rojo} badge="-" />
-              <TarjetaMetrica titulo="Movimiento Bruto" valor={ventas + compras + gastos} color={COLORES.moradoClaro} />
+              <TarjetaMetrica titulo="Otros (+ / -)" valor={otrosAumenta - otrosResta} color={COLORES.azul} badge={otrosAumenta >= otrosResta ? '+' : '-'} />
             </View>
 
             {/* Selector período */}
@@ -956,8 +984,8 @@ function AppContenido() {
               <TarjetaMetrica titulo="Ventas" valor={ventasPeriodo} color={COLORES.verde} />
               <TarjetaMetrica titulo="Compras" valor={comprasPeriodo} color="#F97316" />
               <TarjetaMetrica titulo="Gastos" valor={gastosPeriodo} color={COLORES.rojo} />
-              <TarjetaMetrica titulo="Otros" valor={otrosPeriodo} color={COLORES.azul} />
-              <TarjetaMetrica titulo="Total Periodo" valor={totalSeleccionado} color={COLORES.moradoClaro} />
+              <TarjetaMetrica titulo="Otros (Neto)" valor={otrosPeriodoNeto} color={COLORES.azul} badge={otrosPeriodoNeto >= 0 ? '+' : '-'} />
+              <TarjetaMetrica titulo="Total Periodo" valor={totalPeriodo} color={totalPeriodo >= 0 ? COLORES.verde : COLORES.rojo} badge={totalPeriodo >= 0 ? '+' : '-'} />
             </View>
 
             {/* Últimos movimientos */}
@@ -1205,6 +1233,46 @@ function AppContenido() {
                 ))}
               </View>
 
+              {formulario.tipo === 'otro' && (
+                <View style={styles.cajaOpcionOtro}>
+                  <Text style={styles.etiquetaCampoOtro}>¿Cómo afecta al balance / total?</Text>
+                  <View style={styles.pillsFila}>
+                    <Pressable
+                      onPress={() => setFormulario((a) => ({ ...a, impacto_otro: 'aumenta' }))}
+                      style={[
+                        styles.pillOtroOpcion,
+                        formulario.impacto_otro !== 'resta' ? styles.pillOtroAumentaActivo : styles.pillOtroInactivo,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.textoPillOtro,
+                          formulario.impacto_otro !== 'resta' && styles.textoPillOtroActivo,
+                        ]}
+                      >
+                        ＋ Aumenta (Suma al total)
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setFormulario((a) => ({ ...a, impacto_otro: 'resta' }))}
+                      style={[
+                        styles.pillOtroOpcion,
+                        formulario.impacto_otro === 'resta' ? styles.pillOtroRestaActivo : styles.pillOtroInactivo,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.textoPillOtro,
+                          formulario.impacto_otro === 'resta' && styles.textoPillOtroActivo,
+                        ]}
+                      >
+                        － Resta (Resta del total)
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
+
               <Text style={styles.etiquetaCampo}>Estado del pago</Text>
               <View style={styles.pillsFila}>
                 {(['pendiente', 'pagado'] as Estado[]).map((est) => (
@@ -1252,7 +1320,7 @@ function AppContenido() {
               )}
               <View style={styles.dosColumnas}>
                 <Boton texto={editando ? 'Guardar Cambios' : 'Registrar Movimiento'} onPress={guardar} principal />
-                <Boton texto="Limpiar" onPress={() => { setRegistroNombre(''); setRegistroValor(''); setProductos([]); setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '' }); }} secundario />
+                <Boton texto="Limpiar" onPress={() => { setRegistroNombre(''); setRegistroValor(''); setProductos([]); setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' }); }} secundario />
               </View>
             </View>
           </>
@@ -1400,14 +1468,31 @@ function MovimientoCard({
   const pagado = registro.estado === 'pagado';
   const esVenta = registro.tipo === 'venta';
   const esGasto = registro.tipo === 'gasto' || registro.tipo === 'compra';
+  const esOtro = registro.tipo === 'otro';
+  const otroAumenta = esOtro && registro.impacto_otro !== 'resta';
+  const otroResta = esOtro && registro.impacto_otro === 'resta';
 
   return (
     <View style={styles.movimientoCard}>
       <View style={styles.movimientoCardTop}>
         <View style={styles.movimientoBadges}>
-          <View style={[styles.badgeTipo, esVenta ? styles.badgeVenta : esGasto ? styles.badgeGasto : styles.badgeOtro]}>
-            <Text style={[styles.badgeTipoTexto, esVenta ? styles.textVerde : esGasto ? styles.textRojo : styles.textMorado]}>
-              {registro.tipo.toUpperCase()}
+          <View style={[
+            styles.badgeTipo,
+            esVenta ? styles.badgeVenta :
+            esGasto ? styles.badgeGasto :
+            otroAumenta ? styles.badgeOtroAumenta :
+            otroResta ? styles.badgeOtroResta :
+            styles.badgeOtro
+          ]}>
+            <Text style={[
+              styles.badgeTipoTexto,
+              esVenta ? styles.textVerde :
+              esGasto ? styles.textRojo :
+              otroAumenta ? styles.textVerde :
+              otroResta ? styles.textRojo :
+              styles.textMorado
+            ]}>
+              {esOtro ? (otroResta ? 'OTRO (−)' : 'OTRO (＋)') : registro.tipo.toUpperCase()}
             </Text>
           </View>
           {!!registro.numero_factura && (
@@ -1421,12 +1506,20 @@ function MovimientoCard({
             </Text>
           </Pressable>
         </View>
-        <Text style={[styles.movimientoValor, esVenta ? styles.textVerde : styles.textBlanco]}>{dinero(registro.valor_total)}</Text>
+        <Text style={[
+          styles.movimientoValor,
+          esVenta || otroAumenta ? styles.textVerde :
+          esGasto || otroResta ? styles.textRojo :
+          styles.textBlanco
+        ]}>
+          {esVenta || otroAumenta ? `+${dinero(registro.valor_total)}` : esGasto || otroResta ? `-${dinero(registro.valor_total)}` : dinero(registro.valor_total)}
+        </Text>
       </View>
       <Text style={styles.movimientoNombre}>{registro.nombre}</Text>
       <Text style={styles.movimientoDetalle}>
         {registro.fecha}
         {registro.numero_factura ? ` · Factura #${registro.numero_factura}` : ''}
+        {esOtro ? ` · ${otroResta ? 'Resta del total' : 'Suma al total'}` : ''}
         {registro.proveedor ? ` · ${registro.proveedor}` : ''}
         {registro.categoria ? ` · ${registro.categoria}` : ''}
       </Text>
@@ -1595,6 +1688,14 @@ const styles = StyleSheet.create({
   pillActivo: { backgroundColor: COLORES.morado, borderColor: COLORES.morado },
   textoPill: { color: COLORES.textoSecundario, fontSize: 12, fontWeight: '700' },
   textoPillActivo: { color: COLORES.blanco, fontSize: 12, fontWeight: '800' },
+  cajaOpcionOtro: { backgroundColor: 'rgba(139, 92, 246, 0.12)', borderColor: COLORES.moradoBorde, borderWidth: 1, borderRadius: 16, padding: 12, marginBottom: 14, marginTop: -4 },
+  etiquetaCampoOtro: { color: COLORES.moradoClaro, fontSize: 12, fontWeight: '800', marginBottom: 8 },
+  pillOtroOpcion: { flex: 1, minWidth: 130, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
+  pillOtroInactivo: { backgroundColor: COLORES.superficie, borderColor: COLORES.borde },
+  pillOtroAumentaActivo: { backgroundColor: COLORES.verdeFondo, borderColor: COLORES.verdeBorde },
+  pillOtroRestaActivo: { backgroundColor: COLORES.rojoFondo, borderColor: COLORES.rojoBorde },
+  textoPillOtro: { color: COLORES.textoSecundario, fontSize: 12, fontWeight: '700' },
+  textoPillOtroActivo: { color: COLORES.blanco, fontWeight: '800' },
 
   // Grid métricas
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 16 },
@@ -1613,6 +1714,8 @@ const styles = StyleSheet.create({
   badgeVenta: { backgroundColor: COLORES.verdeFondo, borderWidth: 1, borderColor: COLORES.verdeBorde },
   badgeGasto: { backgroundColor: COLORES.rojoFondo, borderWidth: 1, borderColor: COLORES.rojoBorde },
   badgeOtro: { backgroundColor: COLORES.moradoFondo, borderWidth: 1, borderColor: COLORES.moradoBorde },
+  badgeOtroAumenta: { backgroundColor: COLORES.verdeFondo, borderWidth: 1, borderColor: COLORES.verdeBorde },
+  badgeOtroResta: { backgroundColor: COLORES.rojoFondo, borderWidth: 1, borderColor: COLORES.rojoBorde },
   badgeTipoTexto: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   badgeFactura: { backgroundColor: 'rgba(56, 189, 248, 0.15)', borderWidth: 1, borderColor: '#38BDF8', paddingVertical: 3, paddingHorizontal: 8, borderRadius: 8 },
   badgeFacturaTexto: { color: '#38BDF8', fontSize: 10, fontWeight: '800' },
