@@ -1,7 +1,8 @@
-// Ruta que genera y descarga el archivo Excel.
+// Ruta que genera y descarga archivos Excel.
 const express = require('express');
 const { listar } = require('../servicios/movimientosServicio');
-const { generarLibroExcel } = require('../servicios/excelServicio');
+const inventarioServicio = require('../servicios/inventarioServicio');
+const { generarLibroExcel, generarInventarioExcel } = require('../servicios/excelServicio');
 
 const router = express.Router();
 
@@ -15,6 +16,23 @@ router.get('/excel', async (req, res, next) => {
     const hoy = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="contabilidad-${hoy}.xlsx"`);
+
+    await libro.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/exportar/inventario/excel -> inventario completo o filtrado
+router.get('/inventario/excel', async (req, res, next) => {
+  try {
+    const { productos, resumen, totales_filtrados } = inventarioServicio.listar(req.query);
+    const libro = await generarInventarioExcel(productos, resumen, totales_filtrados);
+
+    const hoy = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="inventario-${hoy}.xlsx"`);
 
     await libro.xlsx.write(res);
     res.end();

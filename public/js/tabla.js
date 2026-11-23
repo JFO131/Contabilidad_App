@@ -133,7 +133,12 @@ function dibujarTabla() {
   }
 
   cuerpo.innerHTML = estado.registros
-    .map((registro, posicion) => `
+    .map((registro, posicion) => {
+      const insigniaInv = registro.afecta_inventario
+        ? `<span class="etiqueta--inv-vinculo" title="Sincronizado con inventario">📦 ${registro.tipo === 'compra' ? '+' : '−'}${numero(registro.cantidad)}</span>`
+        : '';
+
+      return `
       <tr>
         <td class="celda-indice" data-label="">${posicion + 1}</td>
         <td class="acciones" data-label="">
@@ -142,14 +147,15 @@ function dibujarTabla() {
         </td>
         <td data-label="Fecha">${fechaCorta(registro.fecha)}</td>
         <td data-label="Tipo"><span class="etiqueta etiqueta--${registro.tipo}">${ETIQUETA_TIPO[registro.tipo]}</span></td>
-        <td class="celda-nombre" data-label="Nombre">${escaparHtml(registro.nombre)}</td>
+        <td class="celda-nombre" data-label="Nombre">${escaparHtml(registro.nombre)}${insigniaInv}</td>
         <td class="celda-texto" data-label="Proveedor">${escaparHtml(registro.proveedor) || '—'}</td>
         <td class="celda-texto" data-label="Categoría">${escaparHtml(registro.categoria) || '—'}</td>
         <td class="num" data-label="Cantidad">${numero(registro.cantidad)}</td>
         <td class="num" data-label="Valor unitario">${moneda(registro.valor_unitario)}</td>
         <td class="num" data-label="Valor total"><strong>${moneda(registro.valor_total)}</strong></td>
         <td class="celda-observaciones" data-label="Observaciones" title="${escaparHtml(registro.observaciones)}">${escaparHtml(registro.observaciones) || '—'}</td>
-      </tr>`)
+      </tr>`;
+    })
     .join('');
 }
 
@@ -194,16 +200,20 @@ async function eliminarRegistro(id) {
   const registro = estado.registros.find((r) => r.id === id);
   if (!registro) return;
 
+  const avisoInv = registro.afecta_inventario
+    ? ' El stock en el inventario se recalculará automáticamente.'
+    : '';
+
   const confirmado = await confirmar({
     titulo: 'Eliminar registro',
-    mensaje: `¿Seguro que quieres eliminar "${registro.nombre}" del ${fechaCorta(registro.fecha)}? Esta acción no se puede deshacer.`,
+    mensaje: `¿Seguro que quieres eliminar "${registro.nombre}" del ${fechaCorta(registro.fecha)}?${avisoInv} Esta acción no se puede deshacer.`,
     textoAceptar: '🗑️ Eliminar',
   });
   if (!confirmado) return;
 
   try {
     await api.eliminar(id);
-    mostrarAviso('Registro eliminado.');
+    mostrarAviso(registro.afecta_inventario ? 'Registro eliminado y stock recalculado.' : 'Registro eliminado.');
     await alCambiar();
   } catch (error) {
     mostrarAviso(error.message, 'error');

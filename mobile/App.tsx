@@ -23,6 +23,8 @@ type Tipo = 'compra' | 'venta' | 'gasto' | 'otro';
 type ImpactoOtro = 'aumenta' | 'resta';
 type Estado = 'pendiente' | 'pagado';
 type Periodo = 'diario' | 'semanal' | 'mensual' | 'anual' | 'total';
+type EstadoStock = 'disponible' | 'stock_bajo' | 'agotado';
+type OrdenInventario = 'nombre' | 'cantidad_actual' | 'valor_total' | 'precio' | 'categoria' | 'estado';
 
 type Libro = { id: number; nombre: string; descripcion: string; creado: string };
 
@@ -42,11 +44,34 @@ type Movimiento = {
   estado: Estado;
   numero_factura?: string;
   impacto_otro?: ImpactoOtro | string;
+  producto_id?: number | null;
+  afecta_inventario?: number;
   productos?: Producto[] | string;
 };
 
-type Producto = { id: number; nombre: string; cantidad: string; valor_unitario: string };
-type ProductoGuardado = { id: number; nombre: string; precio: number; categoria: string };
+type Producto = { id: number; producto_id?: number | null; nombre: string; cantidad: string; valor_unitario: string };
+type ProductoGuardado = {
+  id: number;
+  nombre: string;
+  precio: number;
+  categoria: string;
+  proveedor: string;
+  cantidad_inicial: number;
+  cantidad_actual: number;
+  stock_minimo: number;
+};
+type InventarioMovimiento = {
+  id: number;
+  producto_id: number;
+  movimiento_id: number | null;
+  libro_id: number | null;
+  tipo: 'entrada' | 'salida';
+  origen: 'compra' | 'venta' | 'gasto' | 'otro' | 'ajuste_manual';
+  cantidad: number;
+  motivo: string;
+  fecha: string;
+  creado_en: string;
+};
 type Categoria = { id: number; nombre: string };
 
 type MovimientoImportado = {
@@ -127,14 +152,34 @@ async function crearTablas(db: any) {
       observaciones TEXT NOT NULL DEFAULT '',
       estado TEXT NOT NULL DEFAULT 'pendiente',
       numero_factura TEXT NOT NULL DEFAULT '',
-      impacto_otro TEXT NOT NULL DEFAULT 'aumenta'
+      impacto_otro TEXT NOT NULL DEFAULT 'aumenta',
+      producto_id INTEGER,
+      afecta_inventario INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS productos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       nombre TEXT NOT NULL UNIQUE,
       precio REAL NOT NULL DEFAULT 0,
-      categoria TEXT NOT NULL DEFAULT ''
+      categoria TEXT NOT NULL DEFAULT '',
+      proveedor TEXT NOT NULL DEFAULT '',
+      cantidad_inicial REAL NOT NULL DEFAULT 0,
+      cantidad_actual REAL NOT NULL DEFAULT 0,
+      stock_minimo REAL NOT NULL DEFAULT 5
     );
+    CREATE TABLE IF NOT EXISTS inventario_movimientos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      producto_id INTEGER NOT NULL,
+      movimiento_id INTEGER,
+      libro_id INTEGER,
+      tipo TEXT NOT NULL,
+      origen TEXT NOT NULL,
+      cantidad REAL NOT NULL,
+      motivo TEXT NOT NULL DEFAULT '',
+      fecha TEXT NOT NULL,
+      creado_en TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_inv_mov_prod ON inventario_movimientos (producto_id);
+    CREATE INDEX IF NOT EXISTS idx_inv_mov_mov ON inventario_movimientos (movimiento_id);
     CREATE TABLE IF NOT EXISTS categorias (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       nombre TEXT NOT NULL UNIQUE
@@ -147,6 +192,12 @@ async function crearTablas(db: any) {
   try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN libro_id INTEGER NOT NULL DEFAULT 1;'); } catch {}
   try { await db.execAsync("ALTER TABLE movimientos ADD COLUMN numero_factura TEXT NOT NULL DEFAULT '';"); } catch {}
   try { await db.execAsync("ALTER TABLE movimientos ADD COLUMN impacto_otro TEXT NOT NULL DEFAULT 'aumenta';"); } catch {}
+  try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN producto_id INTEGER;'); } catch {}
+  try { await db.execAsync('ALTER TABLE movimientos ADD COLUMN afecta_inventario INTEGER NOT NULL DEFAULT 0;'); } catch {}
+  try { await db.execAsync("ALTER TABLE productos ADD COLUMN proveedor TEXT NOT NULL DEFAULT '';"); } catch {}
+  try { await db.execAsync('ALTER TABLE productos ADD COLUMN cantidad_inicial REAL NOT NULL DEFAULT 0;'); } catch {}
+  try { await db.execAsync('ALTER TABLE productos ADD COLUMN cantidad_actual REAL NOT NULL DEFAULT 0;'); } catch {}
+  try { await db.execAsync('ALTER TABLE productos ADD COLUMN stock_minimo REAL NOT NULL DEFAULT 5;'); } catch {}
 
   // Crear libro "Principal" por defecto si no existe ninguno
   const count = (await db.getFirstAsync('SELECT COUNT(*) as n FROM libros')) as { n: number } | null;
@@ -156,6 +207,54 @@ async function crearTablas(db: any) {
       'Principal', 'Libro contable principal', hoy()
     );
   }
+}
+
+function redondear(valor: number) {
+  return Math.round((valor || 0) * 100) / 100;
+}
+
+function obtenerEstadoStock(cantidadActual: number, stockMinimo: number): EstadoStock {
+  if (cantidadActual <= 0) return 'agotado';
+  if (stockMinimo > 0 && cantidadActual <= stockMinimo) return 'stock_bajo';
+  return 'disponible';
+}
+
+function etiquetaEstadoStock(estadoStock: EstadoStock) {
+  if (estadoStock === 'agotado') return 'Agotado';
+  if (estadoStock === 'stock_bajo') return 'Stock bajo';
+  return 'Disponible';
+}
+
+function etiquetaOrigenInv(origen: InventarioMovimiento['origen']) {
+  if (origen === 'compra') return 'Compra';
+  if (origen === 'venta') return 'Venta';
+  if (origen === 'gasto') return 'Gasto (salida)';
+  if (origen === 'otro') return 'Otro (salida)';
+  return 'Ajuste manual';
+}
+
+async function recalcularStockEnTx(db: any, productoId: number, cantidadSolicitada?: number) {
+  const producto = (await db.getFirstAsync(
+    'SELECT id, nombre, cantidad_inicial, cantidad_actual FROM productos WHERE id=?',
+    productoId
+  )) as { id: number; nombre: string; cantidad_inicial: number; cantidad_actual: number } | null;
+  if (!producto) return;
+
+  const suma = (await db.getFirstAsync(
+    "SELECT COALESCE(SUM(CASE WHEN tipo = 'entrada' THEN cantidad ELSE -cantidad END), 0) AS neto FROM inventario_movimientos WHERE producto_id=?",
+    productoId
+  )) as { neto: number } | null;
+
+  const nuevaCantidad = redondear((producto.cantidad_inicial || 0) + (suma?.neto || 0));
+  if (nuevaCantidad < 0) {
+    if (cantidadSolicitada !== undefined) {
+      const disponible = redondear(nuevaCantidad + cantidadSolicitada);
+      throw new Error(`No hay suficiente stock para "${producto.nombre}". Disponible: ${disponible}, solicitado: ${cantidadSolicitada}.`);
+    }
+    throw new Error(`No se puede completar la operación porque el inventario de "${producto.nombre}" quedaría en negativo (${nuevaCantidad}).`);
+  }
+
+  await db.runAsync('UPDATE productos SET cantidad_actual=? WHERE id=?', nuevaCantidad, productoId);
 }
 
 function dinero(valor: number) {
@@ -227,15 +326,43 @@ function AppContenido() {
   const [detalleAbierto, setDetalleAbierto] = useState<number | null>(null);
   const [productosGuardados, setProductosGuardados] = useState<ProductoGuardado[]>([]);
   const [productoSeleccionando, setProductoSeleccionando] = useState<number | null>(null);
-  const [productoCatalogo, setProductoCatalogo] = useState({ nombre: '', precio: '', categoria: '' });
+  const [productoCatalogo, setProductoCatalogo] = useState({
+    nombre: '',
+    precio: '',
+    categoria: '',
+    proveedor: '',
+    cantidad_inicial: '0',
+    stock_minimo: '5',
+  });
   const [productoEditando, setProductoEditando] = useState<number | null>(null);
   const [registroValor, setRegistroValor] = useState('');
   const [estado, setEstado] = useState<Estado>('pendiente');
   const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [nuevaCategoria, setNuevaCategoria] = useState('');
   const [formulario, setFormulario] = useState({
-    nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra' as Tipo, observaciones: '', numero_factura: '', impacto_otro: 'aumenta' as ImpactoOtro,
+    nombre: '', proveedor: '', categoria: '', cantidad: '1', valor_unitario: '', fecha: hoy(), tipo: 'compra' as Tipo, observaciones: '', numero_factura: '', impacto_otro: 'aumenta' as ImpactoOtro,
   });
+
+  // ── Estado de Inventario ──────────────────────────────────────────────────
+  const [invBusqueda, setInvBusqueda] = useState('');
+  const [invCategoriaFiltro, setInvCategoriaFiltro] = useState('');
+  const [invEstadoFiltro, setInvEstadoFiltro] = useState<EstadoStock | ''>('');
+  const [invOrden, setInvOrden] = useState<OrdenInventario>('nombre');
+  const [invDir, setInvDir] = useState<'asc' | 'desc'>('asc');
+  const [productoPrincipalId, setProductoPrincipalId] = useState<number | null>(null);
+  const [mostrarSelectorPrincipal, setMostrarSelectorPrincipal] = useState(false);
+  const [afectaInventario, setAfectaInventario] = useState(false);
+
+  // Modal entrada/salida manual
+  const [modalAjusteProd, setModalAjusteProd] = useState<ProductoGuardado | null>(null);
+  const [ajusteTipo, setAjusteTipo] = useState<'entrada' | 'salida'>('entrada');
+  const [ajusteCantidad, setAjusteCantidad] = useState('1');
+  const [ajusteMotivo, setAjusteMotivo] = useState('');
+  const [ajusteFecha, setAjusteFecha] = useState(hoy());
+
+  // Modal historial de inventario
+  const [modalHistorialProd, setModalHistorialProd] = useState<ProductoGuardado | null>(null);
+  const [historialMovs, setHistorialMovs] = useState<InventarioMovimiento[]>([]);
 
   // ── Estado de Libros ──────────────────────────────────────────────────────
   const [libros, setLibros] = useState<Libro[]>([]);
@@ -284,7 +411,11 @@ function AppContenido() {
     } else {
       setRegistros([]);
     }
-    setProductosGuardados(await db.getAllAsync<ProductoGuardado>('SELECT id, nombre, precio, categoria FROM productos ORDER BY nombre COLLATE NOCASE'));
+    setProductosGuardados(
+      await db.getAllAsync<ProductoGuardado>(
+        'SELECT id, nombre, precio, categoria, proveedor, cantidad_inicial, cantidad_actual, stock_minimo FROM productos ORDER BY nombre COLLATE NOCASE'
+      )
+    );
     setCategorias(await db.getAllAsync<Categoria>('SELECT * FROM categorias ORDER BY nombre COLLATE NOCASE'));
   }
 
@@ -328,6 +459,50 @@ function AppContenido() {
   const cantidadTotal = productos.reduce((s, p) => s + (Number(p.cantidad) || 0), 0);
   const valorTotal = productos.reduce((s, p) => s + ((Number(p.cantidad) || 0) * (Number(p.valor_unitario) || 0)), 0);
 
+  // ── Métricas, filtros y orden del Inventario ──────────────────────────────
+  const invTotalProductos = productosGuardados.length;
+  const invTotalUnidades = redondear(productosGuardados.reduce((s, p) => s + (p.cantidad_actual || 0), 0));
+  const invProductosAgotados = productosGuardados.filter((p) => obtenerEstadoStock(p.cantidad_actual, p.stock_minimo) === 'agotado');
+  const invProductosStockBajo = productosGuardados.filter((p) => obtenerEstadoStock(p.cantidad_actual, p.stock_minimo) === 'stock_bajo');
+  const invAlertas = [...invProductosAgotados, ...invProductosStockBajo];
+  const invValorTotal = redondear(productosGuardados.reduce((s, p) => s + (p.cantidad_actual || 0) * (p.precio || 0), 0));
+
+  const invCategoriasUnicas = Array.from(
+    new Set(productosGuardados.map((p) => p.categoria).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b));
+
+  const inventarioFiltrado = productosGuardados
+    .filter((p) => {
+      const texto = `${p.nombre} ${p.categoria} ${p.proveedor}`.toLowerCase();
+      const est = obtenerEstadoStock(p.cantidad_actual, p.stock_minimo);
+      return (
+        texto.includes(invBusqueda.toLowerCase()) &&
+        (!invCategoriaFiltro || p.categoria === invCategoriaFiltro) &&
+        (!invEstadoFiltro || est === invEstadoFiltro)
+      );
+    })
+    .sort((a, b) => {
+      const factor = invDir === 'asc' ? 1 : -1;
+      if (invOrden === 'nombre') return a.nombre.localeCompare(b.nombre) * factor;
+      if (invOrden === 'categoria') return (a.categoria || '').localeCompare(b.categoria || '') * factor;
+      if (invOrden === 'cantidad_actual') return (a.cantidad_actual - b.cantidad_actual) * factor;
+      if (invOrden === 'precio') return (a.precio - b.precio) * factor;
+      if (invOrden === 'valor_total') return (a.cantidad_actual * a.precio - b.cantidad_actual * b.precio) * factor;
+      const peso = (p: ProductoGuardado) => {
+        const e = obtenerEstadoStock(p.cantidad_actual, p.stock_minimo);
+        return e === 'agotado' ? 0 : e === 'stock_bajo' ? 1 : 2;
+      };
+      return (peso(a) - peso(b)) * factor;
+    });
+
+  function cambiarOrdenInventario(campo: OrdenInventario) {
+    if (invOrden === campo) setInvDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else {
+      setInvOrden(campo);
+      setInvDir('asc');
+    }
+  }
+
   // ── Períodos ──────────────────────────────────────────────────────────────
   const hoyFecha = hoy();
   const fechaActual = new Date(`${hoyFecha}T12:00:00`);
@@ -361,7 +536,10 @@ function AppContenido() {
     setRegistroValor('');
     setEstado('pendiente');
     setProductos([]);
-    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
+    setProductoPrincipalId(null);
+    setMostrarSelectorPrincipal(false);
+    setAfectaInventario(false);
+    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '1', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
     setPantalla('movimientos');
   }
 
@@ -372,9 +550,12 @@ function AppContenido() {
     setRegistroValor(String(registro.valor_registro || (productosEditables.length ? 0 : registro.valor_total)));
     setEstado(registro.estado || 'pendiente');
     setProductos(productosEditables);
+    setProductoPrincipalId(registro.producto_id ?? null);
+    setMostrarSelectorPrincipal(false);
+    setAfectaInventario(Boolean(registro.afecta_inventario));
     setFormulario({
       ...registro,
-      cantidad: String(registro.cantidad),
+      cantidad: String(registro.cantidad || 1),
       valor_unitario: String(registro.valor_unitario),
       numero_factura: registro.numero_factura ? String(registro.numero_factura) : '',
       impacto_otro: (registro.impacto_otro === 'resta' ? 'resta' : 'aumenta') as ImpactoOtro,
@@ -383,39 +564,164 @@ function AppContenido() {
   }
 
   function cambiarProducto(id: number, campo: keyof Omit<Producto, 'id'>, valor: string) {
-    setProductos((actuales) => actuales.map((p) => p.id === id ? { ...p, [campo]: valor } : p));
+    setProductos((actuales) =>
+      actuales.map((p) => {
+        if (p.id !== id) return p;
+        const actualizado = { ...p, [campo]: valor };
+        if (campo === 'nombre') actualizado.producto_id = null;
+        return actualizado;
+      })
+    );
   }
 
   function usarProductoGuardado(producto: ProductoGuardado) {
     if (productoSeleccionando === null) return;
-    cambiarProducto(productoSeleccionando, 'nombre', producto.nombre);
-    cambiarProducto(productoSeleccionando, 'valor_unitario', String(producto.precio));
+    setProductos((actuales) =>
+      actuales.map((p) =>
+        p.id === productoSeleccionando
+          ? { ...p, producto_id: producto.id, nombre: producto.nombre, valor_unitario: String(producto.precio) }
+          : p
+      )
+    );
     setProductoSeleccionando(null);
   }
 
+  function seleccionarProductoPrincipal(producto: ProductoGuardado) {
+    setProductoPrincipalId(producto.id);
+    setRegistroNombre(producto.nombre);
+    const cant = Number(formulario.cantidad) > 0 ? Number(formulario.cantidad) : 1;
+    setFormulario((actual) => ({
+      ...actual,
+      proveedor: producto.proveedor || actual.proveedor,
+      categoria: producto.categoria || actual.categoria,
+      cantidad: String(cant),
+      valor_unitario: String(producto.precio),
+    }));
+    setRegistroValor(String(redondear(cant * producto.precio)));
+    setMostrarSelectorPrincipal(false);
+  }
+
   async function guardarProductoCatalogo() {
+    const nombre = productoCatalogo.nombre.trim();
     const precio = Number(productoCatalogo.precio);
-    if (!productoCatalogo.nombre.trim() || Number.isNaN(precio) || precio < 0) {
-      Alert.alert('Revisa el producto', 'Escribe un nombre y un precio válido.');
+    const cantidadInicial = Number(productoCatalogo.cantidad_inicial === '' ? 0 : productoCatalogo.cantidad_inicial);
+    const stockMinimo = Number(productoCatalogo.stock_minimo === '' ? 5 : productoCatalogo.stock_minimo);
+
+    if (!nombre || Number.isNaN(precio) || precio < 0) {
+      Alert.alert('Revisa el producto', 'Escribe un nombre y un valor unitario válido.');
       return;
     }
+    if (Number.isNaN(cantidadInicial) || cantidadInicial < 0) {
+      Alert.alert('Cantidad inicial inválida', 'La cantidad inicial debe ser 0 o mayor.');
+      return;
+    }
+    if (Number.isNaN(stockMinimo) || stockMinimo < 0) {
+      Alert.alert('Stock mínimo inválido', 'El stock mínimo debe ser 0 o mayor.');
+      return;
+    }
+
     try {
-      if (productoEditando) {
-        await db.runAsync('UPDATE productos SET nombre=?, precio=?, categoria=? WHERE id=?', productoCatalogo.nombre.trim(), precio, productoCatalogo.categoria.trim(), productoEditando);
-      } else {
-        await db.runAsync('INSERT INTO productos (nombre, precio, categoria) VALUES (?, ?, ?)', productoCatalogo.nombre.trim(), precio, productoCatalogo.categoria.trim());
-      }
-      setProductoCatalogo({ nombre: '', precio: '', categoria: '' });
+      await db.withExclusiveTransactionAsync(async () => {
+        if (productoEditando) {
+          await db.runAsync(
+            'UPDATE productos SET nombre=?, precio=?, categoria=?, proveedor=?, cantidad_inicial=?, stock_minimo=? WHERE id=?',
+            nombre,
+            redondear(precio),
+            productoCatalogo.categoria.trim(),
+            productoCatalogo.proveedor.trim(),
+            redondear(cantidadInicial),
+            redondear(stockMinimo),
+            productoEditando
+          );
+          await recalcularStockEnTx(db, productoEditando);
+        } else {
+          await db.runAsync(
+            'INSERT INTO productos (nombre, precio, categoria, proveedor, cantidad_inicial, cantidad_actual, stock_minimo) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            nombre,
+            redondear(precio),
+            productoCatalogo.categoria.trim(),
+            productoCatalogo.proveedor.trim(),
+            redondear(cantidadInicial),
+            redondear(cantidadInicial),
+            redondear(stockMinimo)
+          );
+        }
+      });
+      setProductoCatalogo({ nombre: '', precio: '', categoria: '', proveedor: '', cantidad_inicial: '0', stock_minimo: '5' });
       setProductoEditando(null);
       await cargar();
-    } catch {
-      Alert.alert('Producto repetido', 'Ya existe un producto con ese nombre.');
+    } catch (error: any) {
+      const msg = String(error?.message || '');
+      if (msg.includes('UNIQUE')) {
+        Alert.alert('Producto repetido', 'Ya existe un producto con ese nombre.');
+      } else {
+        Alert.alert('No se pudo guardar', msg || 'Ocurrió un error al guardar el producto.');
+      }
     }
   }
 
   function editarProductoCatalogo(producto: ProductoGuardado) {
     setProductoEditando(producto.id);
-    setProductoCatalogo({ nombre: producto.nombre, precio: String(producto.precio), categoria: producto.categoria });
+    setProductoCatalogo({
+      nombre: producto.nombre,
+      precio: String(producto.precio),
+      categoria: producto.categoria || '',
+      proveedor: producto.proveedor || '',
+      cantidad_inicial: String(producto.cantidad_inicial ?? 0),
+      stock_minimo: String(producto.stock_minimo ?? 5),
+    });
+  }
+
+  function abrirModalAjuste(producto: ProductoGuardado, tipoInicial: 'entrada' | 'salida' = 'entrada') {
+    setModalAjusteProd(producto);
+    setAjusteTipo(tipoInicial);
+    setAjusteCantidad('1');
+    setAjusteMotivo('');
+    setAjusteFecha(hoy());
+  }
+
+  async function registrarAjusteManual() {
+    if (!modalAjusteProd) return;
+    const cant = Number(ajusteCantidad);
+    const motivo = ajusteMotivo.trim();
+    if (Number.isNaN(cant) || cant <= 0) {
+      Alert.alert('Cantidad inválida', 'Ingresa una cantidad mayor que cero.');
+      return;
+    }
+    if (!motivo) {
+      Alert.alert('Motivo requerido', 'Indica el motivo de la entrada o salida manual.');
+      return;
+    }
+
+    try {
+      await db.withExclusiveTransactionAsync(async () => {
+        await db.runAsync(
+          'INSERT INTO inventario_movimientos (producto_id, movimiento_id, libro_id, tipo, origen, cantidad, motivo, fecha) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)',
+          modalAjusteProd.id,
+          libroActivo?.id ?? null,
+          ajusteTipo,
+          'ajuste_manual',
+          redondear(cant),
+          motivo,
+          ajusteFecha || hoy()
+        );
+        await recalcularStockEnTx(db, modalAjusteProd.id, ajusteTipo === 'salida' ? redondear(cant) : undefined);
+      });
+      setModalAjusteProd(null);
+      await cargar();
+      Alert.alert('Inventario actualizado', ajusteTipo === 'entrada' ? 'Entrada manual registrada.' : 'Salida manual registrada.');
+    } catch (error: any) {
+      Alert.alert('Stock insuficiente', error?.message || 'No se pudo registrar el ajuste.');
+    }
+  }
+
+  async function abrirHistorialProducto(producto: ProductoGuardado) {
+    const filas = await db.getAllAsync<InventarioMovimiento>(
+      'SELECT * FROM inventario_movimientos WHERE producto_id=? ORDER BY fecha DESC, id DESC',
+      producto.id
+    );
+    setHistorialMovs(filas);
+    setModalHistorialProd(producto);
   }
 
   async function guardarCategoria() {
@@ -438,18 +744,29 @@ function AppContenido() {
   }
 
   function eliminarProductoCatalogo(id: number) {
-    Alert.alert('Eliminar producto', 'Se quitará del catálogo, pero no de los movimientos ya guardados.', [
+    Alert.alert('Eliminar producto', 'Se quitará del inventario y su historial de stock, pero los movimientos contables ya guardados se conservarán.', [
       { text: 'Cancelar', style: 'cancel' },
-      { text: 'Eliminar', style: 'destructive', onPress: async () => { await db.runAsync('DELETE FROM productos WHERE id=?', id); await cargar(); } },
+      {
+        text: 'Eliminar',
+        style: 'destructive',
+        onPress: async () => {
+          await db.withExclusiveTransactionAsync(async () => {
+            await db.runAsync('DELETE FROM inventario_movimientos WHERE producto_id=?', id);
+            await db.runAsync('UPDATE movimientos SET producto_id=NULL WHERE producto_id=?', id);
+            await db.runAsync('DELETE FROM productos WHERE id=?', id);
+          });
+          await cargar();
+        },
+      },
     ]);
   }
 
   function agregarProducto() {
-    setProductos((actuales) => [...actuales, { id: Date.now(), nombre: '', cantidad: '', valor_unitario: '' }]);
+    setProductos((actuales) => [...actuales, { id: Date.now(), producto_id: null, nombre: '', cantidad: '', valor_unitario: '' }]);
   }
 
   function quitarProducto(id: number) {
-    setProductos((actuales) => actuales.length === 1 ? actuales : actuales.filter((p) => p.id !== id));
+    setProductos((actuales) => actuales.filter((p) => p.id !== id));
   }
 
   async function guardar() {
@@ -458,21 +775,73 @@ function AppContenido() {
       return;
     }
     const productosValidos = productos.filter((p) => p.nombre.trim() && Number(p.cantidad) > 0 && Number(p.valor_unitario) >= 0);
-    const valorRegistro = Number(registroValor);
+    const valorRegistro = Number(registroValor === '' ? 0 : registroValor);
     if (!formulario.fecha || !registroNombre.trim() || Number.isNaN(valorRegistro) || valorRegistro < 0 || productosValidos.length !== productos.length) {
       Alert.alert('Revisa el registro', 'Escribe nombre y valor. Si agregas productos, completa cada cantidad y precio.');
       return;
     }
-    const total = valorRegistro + valorTotal;
-    const cantidad = productos.length ? cantidadTotal : 1;
-    const unitario = productos.length ? valorTotal / cantidadTotal : valorRegistro;
+
+    const cantPrincipal = Number(formulario.cantidad);
+    if (!productos.length && productoPrincipalId && (Number.isNaN(cantPrincipal) || cantPrincipal <= 0)) {
+      Alert.alert('Cantidad inválida', 'Ingresa una cantidad mayor que cero para el producto seleccionado.');
+      return;
+    }
+
+    const total = redondear(valorRegistro + valorTotal);
+    const cantidad = productos.length ? redondear(cantidadTotal) : (cantPrincipal > 0 ? redondear(cantPrincipal) : 1);
+    const unitario = productos.length
+      ? (cantidadTotal > 0 ? redondear(valorTotal / cantidadTotal) : 0)
+      : (cantidad > 0 ? redondear(valorRegistro / cantidad) : valorRegistro);
     const numFactura = (formulario.numero_factura || '').replace(/[^0-9]/g, '');
     const impactoOtro = formulario.tipo === 'otro' ? (formulario.impacto_otro === 'resta' ? 'resta' : 'aumenta') : 'aumenta';
+
+    // Resolver qué productos del inventario resultan afectados por este movimiento
+    const esCompra = formulario.tipo === 'compra';
+    const esVenta = formulario.tipo === 'venta';
+    const esSalidaExtra = (formulario.tipo === 'gasto' || formulario.tipo === 'otro') && afectaInventario;
+    const debeAfectar = esCompra || esVenta || esSalidaExtra;
+    const tipoInv: 'entrada' | 'salida' = esCompra ? 'entrada' : 'salida';
+
+    const buscarProdCatalogo = (idProd?: number | null, nombreProd?: string) => {
+      if (idProd) return productosGuardados.find((p) => p.id === idProd) || null;
+      const limpio = (nombreProd || '').trim().toLowerCase();
+      if (!limpio) return null;
+      return productosGuardados.find((p) => p.nombre.trim().toLowerCase() === limpio) || null;
+    };
+
+    const itemsInventarioMap = new Map<number, number>();
+    let productoPrincipalResuelto: number | null = productoPrincipalId;
+
+    if (debeAfectar) {
+      if (productosValidos.length > 0) {
+        for (const item of productosValidos) {
+          const prod = buscarProdCatalogo(item.producto_id, item.nombre);
+          if (prod) {
+            item.producto_id = prod.id;
+            itemsInventarioMap.set(prod.id, redondear((itemsInventarioMap.get(prod.id) || 0) + Number(item.cantidad)));
+          }
+        }
+      } else {
+        const prod = buscarProdCatalogo(productoPrincipalId, esCompra || esVenta ? registroNombre : undefined);
+        if (prod) {
+          productoPrincipalResuelto = prod.id;
+          itemsInventarioMap.set(prod.id, cantidad);
+        }
+      }
+
+      if (esSalidaExtra && itemsInventarioMap.size === 0) {
+        Alert.alert('Selecciona un producto', 'Para registrar una salida de inventario en un gasto u otro movimiento, vincula al menos un producto del inventario.');
+        return;
+      }
+    }
+
+    const afectaInvFinal = itemsInventarioMap.size > 0 ? 1 : 0;
+
     const datos = [
       libroActivo.id,
       registroNombre.trim(),
-      '',
-      '',
+      formulario.proveedor.trim(),
+      formulario.categoria.trim(),
       cantidad,
       unitario,
       total,
@@ -482,28 +851,75 @@ function AppContenido() {
       formulario.observaciones.trim(),
       numFactura,
       impactoOtro,
+      productoPrincipalResuelto,
+      afectaInvFinal,
       JSON.stringify(productosValidos),
       estado,
     ];
-    if (editando) {
-      await db.runAsync(
-        'UPDATE movimientos SET libro_id=?, nombre=?, proveedor=?, categoria=?, cantidad=?, valor_unitario=?, valor_total=?, valor_registro=?, fecha=?, tipo=?, observaciones=?, numero_factura=?, impacto_otro=?, productos=?, estado=? WHERE id=?',
-        ...datos, editando
-      );
-    } else {
-      await db.runAsync(
-        'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, impacto_otro, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        ...datos
-      );
+
+    try {
+      await db.withExclusiveTransactionAsync(async () => {
+        const productosAfectados = new Set<number>();
+        let movimientoId = editando;
+
+        if (editando) {
+          const previos = await db.getAllAsync<{ producto_id: number }>(
+            'SELECT DISTINCT producto_id FROM inventario_movimientos WHERE movimiento_id=?',
+            editando
+          );
+          for (const prev of previos) productosAfectados.add(prev.producto_id);
+
+          await db.runAsync(
+            'UPDATE movimientos SET libro_id=?, nombre=?, proveedor=?, categoria=?, cantidad=?, valor_unitario=?, valor_total=?, valor_registro=?, fecha=?, tipo=?, observaciones=?, numero_factura=?, impacto_otro=?, producto_id=?, afecta_inventario=?, productos=?, estado=? WHERE id=?',
+            ...datos, editando
+          );
+          await db.runAsync('DELETE FROM inventario_movimientos WHERE movimiento_id=?', editando);
+        } else {
+          const res = await db.runAsync(
+            'INSERT INTO movimientos (libro_id, nombre, proveedor, categoria, cantidad, valor_unitario, valor_total, valor_registro, fecha, tipo, observaciones, numero_factura, impacto_otro, producto_id, afecta_inventario, productos, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ...datos
+          );
+          movimientoId = res.lastInsertRowId;
+        }
+
+        if (afectaInvFinal === 1 && movimientoId) {
+          const motivo = formulario.observaciones.trim() || `${formulario.tipo.toUpperCase()}: ${registroNombre.trim()}`;
+          for (const [prodId, cantItem] of itemsInventarioMap.entries()) {
+            productosAfectados.add(prodId);
+            await db.runAsync(
+              'INSERT INTO inventario_movimientos (producto_id, movimiento_id, libro_id, tipo, origen, cantidad, motivo, fecha) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+              prodId,
+              movimientoId,
+              libroActivo.id,
+              tipoInv,
+              formulario.tipo,
+              cantItem,
+              motivo,
+              formulario.fecha
+            );
+          }
+        }
+
+        for (const prodId of productosAfectados) {
+          const cantSalida = tipoInv === 'salida' ? itemsInventarioMap.get(prodId) : undefined;
+          await recalcularStockEnTx(db, prodId, cantSalida);
+        }
+      });
+
+      await cargar();
+      setEditando(null);
+      setRegistroNombre('');
+      setRegistroValor('');
+      setEstado('pendiente');
+      setProductos([]);
+      setProductoPrincipalId(null);
+      setMostrarSelectorPrincipal(false);
+      setAfectaInventario(false);
+      setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '1', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
+      Alert.alert('¡Guardado!', afectaInvFinal ? 'El movimiento se registró y el inventario se actualizó automáticamente.' : 'El movimiento se ha registrado correctamente.');
+    } catch (error: any) {
+      Alert.alert('Stock insuficiente / Error', error?.message || 'No se pudo guardar el movimiento.');
     }
-    await cargar();
-    setEditando(null);
-    setRegistroNombre('');
-    setRegistroValor('');
-    setEstado('pendiente');
-    setProductos([]);
-    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
-    Alert.alert('¡Guardado!', 'El movimiento se ha registrado correctamente.');
   }
 
   function leerProductos(registro: Movimiento): Producto[] {
@@ -517,9 +933,30 @@ function AppContenido() {
   }
 
   function eliminar(id: number) {
-    Alert.alert('Eliminar movimiento', 'Esta acción no se puede deshacer.', [
+    Alert.alert('Eliminar movimiento', 'Esta acción no se puede deshacer. Si estaba vinculado al inventario, el stock se recalculará automáticamente.', [
       { text: 'Cancelar', style: 'cancel' },
-      { text: 'Eliminar', style: 'destructive', onPress: async () => { await db.runAsync('DELETE FROM movimientos WHERE id=?', id); await cargar(); } },
+      {
+        text: 'Eliminar',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await db.withExclusiveTransactionAsync(async () => {
+              const afectados = await db.getAllAsync<{ producto_id: number }>(
+                'SELECT DISTINCT producto_id FROM inventario_movimientos WHERE movimiento_id=?',
+                id
+              );
+              await db.runAsync('DELETE FROM inventario_movimientos WHERE movimiento_id=?', id);
+              await db.runAsync('DELETE FROM movimientos WHERE id=?', id);
+              for (const fila of afectados) {
+                await recalcularStockEnTx(db, fila.producto_id);
+              }
+            });
+            await cargar();
+          } catch (error: any) {
+            Alert.alert('No se pudo eliminar', error?.message || 'Eliminar este movimiento dejaría el stock negativo.');
+          }
+        },
+      },
     ]);
   }
 
@@ -557,15 +994,32 @@ function AppContenido() {
     setModalConfirmarElimLibro(null);
     const count = await db.getFirstAsync<{ n: number }>('SELECT COUNT(*) as n FROM movimientos WHERE libro_id=?', libro.id);
     const movCount = count?.n ?? 0;
-    await db.runAsync('DELETE FROM movimientos WHERE libro_id=?', libro.id);
-    await db.runAsync('DELETE FROM libros WHERE id=?', libro.id);
-    if (libroActivo?.id === libro.id) {
-      const rows = await db.getAllAsync<Libro>('SELECT * FROM libros ORDER BY creado ASC, id ASC');
-      setLibros(rows);
-      setLibroActivo(rows[0] ?? null);
+    try {
+      await db.withExclusiveTransactionAsync(async () => {
+        const afectados = await db.getAllAsync<{ producto_id: number }>(
+          'SELECT DISTINCT producto_id FROM inventario_movimientos WHERE movimiento_id IN (SELECT id FROM movimientos WHERE libro_id=?)',
+          libro.id
+        );
+        await db.runAsync(
+          'DELETE FROM inventario_movimientos WHERE movimiento_id IN (SELECT id FROM movimientos WHERE libro_id=?)',
+          libro.id
+        );
+        await db.runAsync('DELETE FROM movimientos WHERE libro_id=?', libro.id);
+        await db.runAsync('DELETE FROM libros WHERE id=?', libro.id);
+        for (const fila of afectados) {
+          await recalcularStockEnTx(db, fila.producto_id);
+        }
+      });
+      if (libroActivo?.id === libro.id) {
+        const rows = await db.getAllAsync<Libro>('SELECT * FROM libros ORDER BY creado ASC, id ASC');
+        setLibros(rows);
+        setLibroActivo(rows[0] ?? null);
+      }
+      await cargar();
+      Alert.alert('Libro eliminado', `Se eliminó "${libro.nombre}" junto con ${movCount} movimiento(s).`);
+    } catch (error: any) {
+      Alert.alert('No se pudo eliminar', error?.message || 'Eliminar este libro dejaría productos del inventario con stock negativo.');
     }
-    await cargar();
-    Alert.alert('Libro eliminado', `Se eliminó "${libro.nombre}" junto con ${movCount} movimiento(s).`);
   }
 
   function seleccionarLibro(libro: Libro) {
@@ -910,6 +1364,21 @@ function AppContenido() {
         {/* ── RESUMEN ──────────────────────────────────────────────────── */}
         {pantalla === 'resumen' ? (
           <>
+            {/* Alertas rápidas de inventario */}
+            {invAlertas.length > 0 && (
+              <Pressable style={styles.alertaInvBanner} onPress={() => setPantalla('productos')}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.alertaInvTitulo}>
+                    ⚠️ Inventario: {invProductosAgotados.length > 0 ? `${invProductosAgotados.length} agotado(s)` : ''}
+                    {invProductosAgotados.length > 0 && invProductosStockBajo.length > 0 ? ' · ' : ''}
+                    {invProductosStockBajo.length > 0 ? `${invProductosStockBajo.length} con stock bajo` : ''}
+                  </Text>
+                  <Text style={styles.alertaInvSub}>Toca aquí para revisar y reabastecer productos.</Text>
+                </View>
+                <Text style={styles.linkVerTodos}>Ver ›</Text>
+              </Pressable>
+            )}
+
             {/* Tarjeta de Balance */}
             <View style={styles.balanceCard}>
               <View style={styles.balanceHeader}>
@@ -1150,15 +1619,235 @@ function AppContenido() {
             {!libros.length && <Vacio texto="No tienes libros contables. Crea el primero." />}
           </>
         ) : pantalla === 'productos' ? (
-          /* ── PRODUCTOS Y CATÁLOGO ────────────────────────────────────── */
+          /* ── INVENTARIO DE PRODUCTOS ─────────────────────────────────── */
           <>
-            <Text style={styles.pantallaTitulo}>Catálogo de Productos</Text>
-            <Text style={styles.subtituloTabla}>Guarda productos frecuentes para agregarlos rápido a tus registros.</Text>
+            <Text style={styles.pantallaTitulo}>Inventario</Text>
+            <Text style={styles.subtituloTabla}>Control automático de existencias conectado a tus compras y ventas.</Text>
 
-            <View style={styles.tarjetaFormulario}>
+            {/* Resumen del inventario */}
+            <View style={styles.grid}>
+              <View style={styles.tarjetaMetrica}>
+                <View style={styles.tarjetaMetricaHeader}>
+                  <View style={[styles.puntoColor, { backgroundColor: COLORES.moradoClaro }]} />
+                  <Text style={styles.tarjetaMetricaTitulo}>Productos</Text>
+                </View>
+                <Text style={[styles.tarjetaMetricaValor, { color: COLORES.blanco }]}>{invTotalProductos}</Text>
+              </View>
+              <View style={styles.tarjetaMetrica}>
+                <View style={styles.tarjetaMetricaHeader}>
+                  <View style={[styles.puntoColor, { backgroundColor: COLORES.azul }]} />
+                  <Text style={styles.tarjetaMetricaTitulo}>Unidades disp.</Text>
+                </View>
+                <Text style={[styles.tarjetaMetricaValor, { color: COLORES.blanco }]}>{invTotalUnidades}</Text>
+              </View>
+              <View style={styles.tarjetaMetrica}>
+                <View style={styles.tarjetaMetricaHeader}>
+                  <View style={[styles.puntoColor, { backgroundColor: COLORES.amarillo }]} />
+                  <Text style={styles.tarjetaMetricaTitulo}>Stock bajo</Text>
+                </View>
+                <Text style={[styles.tarjetaMetricaValor, { color: COLORES.amarillo }]}>{invProductosStockBajo.length}</Text>
+              </View>
+              <View style={styles.tarjetaMetrica}>
+                <View style={styles.tarjetaMetricaHeader}>
+                  <View style={[styles.puntoColor, { backgroundColor: COLORES.rojo }]} />
+                  <Text style={styles.tarjetaMetricaTitulo}>Agotados</Text>
+                </View>
+                <Text style={[styles.tarjetaMetricaValor, { color: COLORES.rojo }]}>{invProductosAgotados.length}</Text>
+              </View>
+            </View>
+            <View style={styles.invValorTotalCard}>
+              <Text style={styles.invValorTotalLabel}>Valor total del inventario</Text>
+              <Text style={styles.invValorTotalMonto}>{dinero(invValorTotal)}</Text>
+            </View>
+
+            {/* Alertas visuales de stock */}
+            {invAlertas.length > 0 && (
+              <View style={styles.alertaInvCaja}>
+                <Text style={styles.alertaInvTitulo}>
+                  ⚠️ Alerta de reabastecimiento ({invAlertas.length} producto{invAlertas.length === 1 ? '' : 's'})
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingTop: 8 }}>
+                  {invAlertas.map((p) => {
+                    const est = obtenerEstadoStock(p.cantidad_actual, p.stock_minimo);
+                    return (
+                      <Pressable
+                        key={p.id}
+                        onPress={() => abrirModalAjuste(p, 'entrada')}
+                        style={[styles.alertaInvChip, est === 'agotado' ? styles.alertaInvChipRojo : styles.alertaInvChipAmarillo]}
+                      >
+                        <Text style={est === 'agotado' ? styles.textRojo : styles.textAmarillo}>
+                          {est === 'agotado' ? '🔴' : '🟡'} {p.nombre} ({p.cantidad_actual} uds) ＋
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            )}
+
+            {/* Búsqueda, filtros y orden */}
+            <View style={styles.searchContainer}>
+              <Text style={styles.searchIcon}>🔍</Text>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Buscar por nombre, categoría o proveedor..."
+                placeholderTextColor={COLORES.textoMuted}
+                value={invBusqueda}
+                onChangeText={setInvBusqueda}
+              />
+              {!!invBusqueda && (
+                <Pressable onPress={() => setInvBusqueda('')} style={styles.clearSearch}>
+                  <Text style={styles.clearSearchText}>✕</Text>
+                </Pressable>
+              )}
+            </View>
+
+            <Text style={styles.filtroTitulo}>Estado del stock</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsScroll}>
+              {(['', 'disponible', 'stock_bajo', 'agotado'] as const).map((est) => (
+                <Pressable
+                  key={est || 'todos-inv'}
+                  onPress={() => setInvEstadoFiltro(est)}
+                  style={[styles.pill, invEstadoFiltro === est && styles.pillActivo]}
+                >
+                  <Text style={invEstadoFiltro === est ? styles.textoPillActivo : styles.textoPill}>
+                    {est ? etiquetaEstadoStock(est).toUpperCase() : 'TODOS'}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {!!invCategoriasUnicas.length && (
+              <>
+                <Text style={styles.filtroTitulo}>Categoría</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsScroll}>
+                  <Pressable onPress={() => setInvCategoriaFiltro('')} style={[styles.pill, !invCategoriaFiltro && styles.pillActivo]}>
+                    <Text style={!invCategoriaFiltro ? styles.textoPillActivo : styles.textoPill}>TODAS</Text>
+                  </Pressable>
+                  {invCategoriasUnicas.map((cat) => (
+                    <Pressable key={cat} onPress={() => setInvCategoriaFiltro(cat)} style={[styles.pill, invCategoriaFiltro === cat && styles.pillActivo]}>
+                      <Text style={invCategoriaFiltro === cat ? styles.textoPillActivo : styles.textoPill}>{cat}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </>
+            )}
+
+            <Text style={styles.filtroTitulo}>Ordenar tabla ({invDir === 'asc' ? '▲ Asc' : '▼ Desc'})</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsScroll}>
+              {([
+                ['nombre', 'Nombre'],
+                ['cantidad_actual', 'Disponible'],
+                ['valor_total', 'Valor total'],
+                ['precio', 'V. unitario'],
+                ['estado', 'Estado'],
+              ] as [OrdenInventario, string][]).map(([clave, etiqueta]) => (
+                <Pressable
+                  key={clave}
+                  onPress={() => cambiarOrdenInventario(clave)}
+                  style={[styles.pill, invOrden === clave && styles.pillActivo]}
+                >
+                  <Text style={invOrden === clave ? styles.textoPillActivo : styles.textoPill}>
+                    {etiqueta}{invOrden === clave ? (invDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {/* Tabla tipo Excel deslizable */}
+            <Text style={styles.seccionTitulo}>Tabla de Inventario ({inventarioFiltrado.length})</Text>
+            {inventarioFiltrado.length > 0 ? (
+              <ScrollView horizontal showsHorizontalScrollIndicator style={styles.excelWrap}>
+                <View>
+                  <View style={styles.excelHeader}>
+                    <Text style={[styles.excelTh, { width: 150 }]}>Producto</Text>
+                    <Text style={[styles.excelTh, { width: 100 }]}>Categoría</Text>
+                    <Text style={[styles.excelTh, { width: 110 }]}>Proveedor</Text>
+                    <Text style={[styles.excelTh, styles.excelNum, { width: 70 }]}>Inicial</Text>
+                    <Text style={[styles.excelTh, styles.excelNum, { width: 85 }]}>Disponible</Text>
+                    <Text style={[styles.excelTh, styles.excelNum, { width: 65 }]}>Mín.</Text>
+                    <Text style={[styles.excelTh, styles.excelNum, { width: 95 }]}>V. unitario</Text>
+                    <Text style={[styles.excelTh, styles.excelNum, { width: 105 }]}>V. total</Text>
+                    <Text style={[styles.excelTh, { width: 100 }]}>Estado</Text>
+                    <Text style={[styles.excelTh, { width: 195 }]}>Acciones</Text>
+                  </View>
+                  {inventarioFiltrado.map((prod, idx) => {
+                    const est = obtenerEstadoStock(prod.cantidad_actual, prod.stock_minimo);
+                    const valTot = redondear(prod.cantidad_actual * prod.precio);
+                    return (
+                      <View
+                        key={prod.id}
+                        style={[
+                          styles.excelRow,
+                          idx % 2 === 1 && styles.excelRowAlt,
+                          est === 'agotado' && styles.excelRowAgotado,
+                          est === 'stock_bajo' && styles.excelRowBajo,
+                        ]}
+                      >
+                        <Text style={[styles.excelTd, styles.excelTdBold, { width: 150 }]} numberOfLines={2}>{prod.nombre}</Text>
+                        <Text style={[styles.excelTd, { width: 100 }]} numberOfLines={1}>{prod.categoria || '—'}</Text>
+                        <Text style={[styles.excelTd, { width: 110 }]} numberOfLines={1}>{prod.proveedor || '—'}</Text>
+                        <Text style={[styles.excelTd, styles.excelNum, { width: 70 }]}>{prod.cantidad_inicial}</Text>
+                        <Text style={[styles.excelTd, styles.excelTdBold, styles.excelNum, { width: 85 }]}>{prod.cantidad_actual}</Text>
+                        <Text style={[styles.excelTd, styles.excelNum, { width: 65 }]}>{prod.stock_minimo}</Text>
+                        <Text style={[styles.excelTd, styles.excelNum, { width: 95 }]}>{dinero(prod.precio)}</Text>
+                        <Text style={[styles.excelTd, styles.excelTdBold, styles.excelNum, { width: 105 }]}>{dinero(valTot)}</Text>
+                        <View style={{ width: 100, justifyContent: 'center', paddingHorizontal: 4 }}>
+                          <View style={[
+                            styles.badgeStock,
+                            est === 'disponible' ? styles.badgeStockOk : est === 'stock_bajo' ? styles.badgeStockBajo : styles.badgeStockAgotado,
+                          ]}>
+                            <Text style={[
+                              styles.badgeStockTexto,
+                              est === 'disponible' ? styles.textVerde : est === 'stock_bajo' ? styles.textAmarillo : styles.textRojo,
+                            ]}>
+                              {etiquetaEstadoStock(est)}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={{ width: 195, flexDirection: 'row', gap: 6, alignItems: 'center', paddingHorizontal: 4 }}>
+                          <Pressable onPress={() => abrirModalAjuste(prod)} style={styles.botonInfoPill}>
+                            <Text style={styles.botonInfoPillTexto}>⇄</Text>
+                          </Pressable>
+                          <Pressable onPress={() => abrirHistorialProducto(prod)} style={styles.botonInfoPill}>
+                            <Text style={styles.botonInfoPillTexto}>📜</Text>
+                          </Pressable>
+                          <Pressable onPress={() => editarProductoCatalogo(prod)} style={styles.botonEditarPill}>
+                            <Text style={styles.botonEditarPillTexto}>Editar</Text>
+                          </Pressable>
+                          <Pressable onPress={() => eliminarProductoCatalogo(prod.id)} style={styles.botonBorrarPill}>
+                            <Text style={styles.botonBorrarPillTexto}>🗑</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+              </ScrollView>
+            ) : (
+              <Vacio texto={invBusqueda || invEstadoFiltro || invCategoriaFiltro ? 'Ningún producto coincide con los filtros.' : 'Aún no tienes productos en el inventario. Crea el primero abajo.'} />
+            )}
+
+            {/* Formulario crear / editar producto */}
+            <View style={[styles.tarjetaFormulario, { marginTop: 18 }]}>
               <Text style={styles.tarjetaFormularioTitulo}>{productoEditando ? 'Editar Producto' : 'Nuevo Producto'}</Text>
-              <Campo etiqueta="Nombre del producto" valor={productoCatalogo.nombre} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, nombre: v }))} />
-              <Campo etiqueta="Precio unitario" valor={productoCatalogo.precio} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, precio: v }))} teclado="decimal-pad" />
+              <Campo etiqueta="Nombre del producto *" valor={productoCatalogo.nombre} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, nombre: v }))} />
+              <View style={styles.dosColumnas}>
+                <View style={styles.columna}>
+                  <Campo etiqueta="Valor unitario *" valor={productoCatalogo.precio} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, precio: v }))} teclado="decimal-pad" />
+                </View>
+                <View style={styles.columna}>
+                  <Campo etiqueta="Proveedor" valor={productoCatalogo.proveedor} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, proveedor: v }))} />
+                </View>
+              </View>
+              <View style={styles.dosColumnas}>
+                <View style={styles.columna}>
+                  <Campo etiqueta="Cantidad inicial *" valor={productoCatalogo.cantidad_inicial} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, cantidad_inicial: v }))} teclado="decimal-pad" />
+                </View>
+                <View style={styles.columna}>
+                  <Campo etiqueta="Stock mínimo *" valor={productoCatalogo.stock_minimo} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, stock_minimo: v }))} teclado="decimal-pad" />
+                </View>
+              </View>
               <Campo etiqueta="Categoría del producto" valor={productoCatalogo.categoria} cambiar={(v) => setProductoCatalogo((a) => ({ ...a, categoria: v }))} />
               {!!categorias.length && (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsScroll}>
@@ -1171,7 +1860,7 @@ function AppContenido() {
               )}
               <View style={styles.dosColumnas}>
                 <Boton texto={productoEditando ? 'Guardar Cambios' : 'Guardar Producto'} onPress={guardarProductoCatalogo} principal />
-                <Boton texto="Limpiar" onPress={() => { setProductoEditando(null); setProductoCatalogo({ nombre: '', precio: '', categoria: '' }); }} secundario />
+                <Boton texto="Limpiar" onPress={() => { setProductoEditando(null); setProductoCatalogo({ nombre: '', precio: '', categoria: '', proveedor: '', cantidad_inicial: '0', stock_minimo: '5' }); }} secundario />
               </View>
             </View>
 
@@ -1190,28 +1879,6 @@ function AppContenido() {
                 </View>
               ))}
             </View>
-
-            <Text style={styles.seccionTitulo}>Productos Guardados ({productosGuardados.length})</Text>
-            {productosGuardados.map((prod) => (
-              <View key={prod.id} style={styles.productoItemCard}>
-                <View style={styles.productoItemInfo}>
-                  <Text style={styles.productoItemNombre}>{prod.nombre}</Text>
-                  <Text style={styles.productoItemCat}>{prod.categoria || 'Sin categoría'}</Text>
-                </View>
-                <View style={styles.productoItemDerecha}>
-                  <Text style={styles.productoItemPrecio}>{dinero(prod.precio)}</Text>
-                  <View style={styles.productoItemAcciones}>
-                    <Pressable onPress={() => editarProductoCatalogo(prod)} style={styles.botonEditarPill}>
-                      <Text style={styles.botonEditarPillTexto}>Editar</Text>
-                    </Pressable>
-                    <Pressable onPress={() => eliminarProductoCatalogo(prod.id)} style={styles.botonBorrarPill}>
-                      <Text style={styles.botonBorrarPillTexto}>Borrar</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              </View>
-            ))}
-            {!productosGuardados.length && <Vacio texto="Aún no tienes productos en el catálogo." />}
           </>
         ) : (
           /* ── NUEVO / EDITAR MOVIMIENTO ───────────────────────────────── */
@@ -1220,18 +1887,93 @@ function AppContenido() {
             <Text style={styles.subtituloTabla}>Ingresa los datos para mantener tu contabilidad al día.</Text>
 
             <View style={styles.tarjetaFormulario}>
-              <Campo etiqueta="Nombre o Concepto" valor={registroNombre} cambiar={setRegistroNombre} />
+              <Campo
+                etiqueta="Nombre o Concepto"
+                valor={registroNombre}
+                cambiar={(v) => {
+                  setRegistroNombre(v);
+                  setProductoPrincipalId(null);
+                }}
+              />
+              {!productos.length && (
+                <View style={{ marginBottom: 10 }}>
+                  <SelectorCatalogo
+                    productos={productosGuardados}
+                    onSelect={seleccionarProductoPrincipal}
+                    onOpen={() => setMostrarSelectorPrincipal((a) => !a)}
+                    abierto={mostrarSelectorPrincipal}
+                    etiquetaBoton={productoPrincipalId ? '📦 Producto vinculado del inventario (cambiar)' : '📦 Vincular producto del inventario (opcional)'}
+                  />
+                  {productoPrincipalId && (() => {
+                    const pSel = productosGuardados.find((p) => p.id === productoPrincipalId);
+                    if (!pSel) return null;
+                    const est = obtenerEstadoStock(pSel.cantidad_actual, pSel.stock_minimo);
+                    return (
+                      <View style={styles.stockVinculoBox}>
+                        <Text style={styles.stockVinculoTexto}>
+                          Stock de {pSel.nombre}: <Text style={{ fontWeight: '800', color: est === 'agotado' ? COLORES.rojo : est === 'stock_bajo' ? COLORES.amarillo : COLORES.verde }}>{pSel.cantidad_actual} uds</Text> ({etiquetaEstadoStock(est)})
+                        </Text>
+                        <Pressable onPress={() => setProductoPrincipalId(null)}>
+                          <Text style={styles.subproductoQuitar}>Desvincular ✕</Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })()}
+                </View>
+              )}
+              {!productos.length && productoPrincipalId && (
+                <Campo
+                  etiqueta="Cantidad de unidades"
+                  valor={formulario.cantidad}
+                  cambiar={(v) => {
+                    cambiar('cantidad', v);
+                    const pSel = productosGuardados.find((p) => p.id === productoPrincipalId);
+                    const cantNum = Number(v);
+                    if (pSel && !Number.isNaN(cantNum) && cantNum >= 0) {
+                      setRegistroValor(String(redondear(cantNum * pSel.precio)));
+                    }
+                  }}
+                  teclado="decimal-pad"
+                />
+              )}
               <Campo etiqueta="Valor del registro o saldo" valor={registroValor} cambiar={setRegistroValor} teclado="decimal-pad" />
               <Campo etiqueta="Fecha (AAAA-MM-DD)" valor={formulario.fecha} cambiar={(v) => cambiar('fecha', v)} />
 
               <Text style={styles.etiquetaCampo}>Tipo de movimiento</Text>
               <View style={styles.pillsFila}>
                 {(['compra', 'venta', 'gasto', 'otro'] as Tipo[]).map((tipo) => (
-                  <Pressable key={tipo} onPress={() => setFormulario((a) => ({ ...a, tipo }))} style={[styles.pill, formulario.tipo === tipo && styles.pillActivo]}>
+                  <Pressable
+                    key={tipo}
+                    onPress={() => {
+                      setFormulario((a) => ({ ...a, tipo }));
+                      if (tipo === 'compra' || tipo === 'venta') setAfectaInventario(false);
+                    }}
+                    style={[styles.pill, formulario.tipo === tipo && styles.pillActivo]}
+                  >
                     <Text style={formulario.tipo === tipo ? styles.textoPillActivo : styles.textoPill}>{tipo.toUpperCase()}</Text>
                   </Pressable>
                 ))}
               </View>
+
+              {(formulario.tipo === 'gasto' || formulario.tipo === 'otro') && (
+                <View style={styles.cajaOpcionOtro}>
+                  <Text style={styles.etiquetaCampoOtro}>📦 ¿Corresponde a una salida de productos del inventario?</Text>
+                  <View style={styles.pillsFila}>
+                    <Pressable
+                      onPress={() => setAfectaInventario(false)}
+                      style={[styles.pillOtroOpcion, !afectaInventario ? styles.pillOtroAumentaActivo : styles.pillOtroInactivo]}
+                    >
+                      <Text style={[styles.textoPillOtro, !afectaInventario && styles.textoPillOtroActivo]}>No modifica stock</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setAfectaInventario(true)}
+                      style={[styles.pillOtroOpcion, afectaInventario ? styles.pillOtroRestaActivo : styles.pillOtroInactivo]}
+                    >
+                      <Text style={[styles.textoPillOtro, afectaInventario && styles.textoPillOtroActivo]}>Sí, descontar stock</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
 
               {formulario.tipo === 'otro' && (
                 <View style={styles.cajaOpcionOtro}>
@@ -1320,7 +2062,18 @@ function AppContenido() {
               )}
               <View style={styles.dosColumnas}>
                 <Boton texto={editando ? 'Guardar Cambios' : 'Registrar Movimiento'} onPress={guardar} principal />
-                <Boton texto="Limpiar" onPress={() => { setRegistroNombre(''); setRegistroValor(''); setProductos([]); setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' }); }} secundario />
+                <Boton
+                  texto="Limpiar"
+                  onPress={() => {
+                    setRegistroNombre('');
+                    setRegistroValor('');
+                    setProductos([]);
+                    setProductoPrincipalId(null);
+                    setAfectaInventario(false);
+                    setFormulario({ nombre: '', proveedor: '', categoria: '', cantidad: '1', valor_unitario: '', fecha: hoy(), tipo: 'compra', observaciones: '', numero_factura: '', impacto_otro: 'aumenta' });
+                  }}
+                  secundario
+                />
               </View>
             </View>
           </>
@@ -1427,13 +2180,115 @@ function AppContenido() {
         </View>
       </Modal>
 
+      {/* ── Modal entrada / salida manual de inventario ──────────────── */}
+      <Modal visible={!!modalAjusteProd} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalIcono}><Text style={styles.modalIconoTexto}>⇄</Text></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitulo}>Entrada / Salida manual</Text>
+                <Text style={styles.modalSubtitulo} numberOfLines={1}>
+                  {modalAjusteProd?.nombre} · Disponible: {modalAjusteProd?.cantidad_actual ?? 0} uds
+                </Text>
+              </View>
+              <Pressable onPress={() => setModalAjusteProd(null)} style={styles.modalCerrar}>
+                <Text style={styles.modalCerrarTexto}>✕</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.pillsFila}>
+              <Pressable
+                onPress={() => setAjusteTipo('entrada')}
+                style={[styles.pillOtroOpcion, ajusteTipo === 'entrada' ? styles.pillOtroAumentaActivo : styles.pillOtroInactivo]}
+              >
+                <Text style={[styles.textoPillOtro, ajusteTipo === 'entrada' && styles.textoPillOtroActivo]}>＋ Entrada</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setAjusteTipo('salida')}
+                style={[styles.pillOtroOpcion, ajusteTipo === 'salida' ? styles.pillOtroRestaActivo : styles.pillOtroInactivo]}
+              >
+                <Text style={[styles.textoPillOtro, ajusteTipo === 'salida' && styles.textoPillOtroActivo]}>− Salida</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.dosColumnas}>
+              <View style={styles.columna}>
+                <Campo etiqueta="Cantidad *" valor={ajusteCantidad} cambiar={setAjusteCantidad} teclado="decimal-pad" />
+              </View>
+              <View style={styles.columna}>
+                <Campo etiqueta="Fecha (AAAA-MM-DD)" valor={ajusteFecha} cambiar={setAjusteFecha} />
+              </View>
+            </View>
+            <Campo etiqueta="Motivo *" valor={ajusteMotivo} cambiar={setAjusteMotivo} multiline />
+
+            {modalAjusteProd && (
+              <View style={styles.totalCalculadoCard}>
+                <Text style={styles.totalCalculadoLabel}>Stock resultante:</Text>
+                <Text style={[
+                  styles.totalCalculadoValor,
+                  ajusteTipo === 'salida' && (modalAjusteProd.cantidad_actual - (Number(ajusteCantidad) || 0)) < 0 && { color: COLORES.rojo },
+                ]}>
+                  {redondear(
+                    ajusteTipo === 'entrada'
+                      ? modalAjusteProd.cantidad_actual + (Number(ajusteCantidad) || 0)
+                      : modalAjusteProd.cantidad_actual - (Number(ajusteCantidad) || 0)
+                  )} uds
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.dosColumnas}>
+              <Boton texto="Guardar ajuste" onPress={registrarAjusteManual} principal />
+              <Boton texto="Cancelar" onPress={() => setModalAjusteProd(null)} secundario />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Modal historial de movimientos del producto ──────────────── */}
+      <Modal visible={!!modalHistorialProd} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalIcono}><Text style={styles.modalIconoTexto}>📜</Text></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitulo} numberOfLines={1}>Historial: {modalHistorialProd?.nombre}</Text>
+                <Text style={styles.modalSubtitulo}>
+                  Inicial: {modalHistorialProd?.cantidad_inicial ?? 0} · Disponible: {modalHistorialProd?.cantidad_actual ?? 0} uds
+                </Text>
+              </View>
+              <Pressable onPress={() => setModalHistorialProd(null)} style={styles.modalCerrar}>
+                <Text style={styles.modalCerrarTexto}>✕</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={styles.modalPreviewScroll}>
+              {historialMovs.length > 0 ? historialMovs.map((m) => (
+                <View key={m.id} style={styles.modalPreviewFila}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.modalPreviewNombre}>{etiquetaOrigenInv(m.origen)}</Text>
+                    <Text style={styles.modalPreviewDetalle}>{m.fecha}{m.motivo ? ` · ${m.motivo}` : ''}</Text>
+                  </View>
+                  <Text style={[styles.modalPreviewValor, m.tipo === 'entrada' ? styles.textVerde : styles.textRojo]}>
+                    {m.tipo === 'entrada' ? '+' : '−'}{m.cantidad}
+                  </Text>
+                </View>
+              )) : (
+                <Text style={styles.modalPreviewMas}>Aún no hay entradas ni salidas registradas para este producto.</Text>
+              )}
+            </ScrollView>
+            <Boton texto="Cerrar" onPress={() => setModalHistorialProd(null)} principal />
+          </View>
+        </View>
+      </Modal>
+
       {/* ── Barra navegación inferior ────────────────────────────────── */}
       <View style={[styles.navegacion, { paddingBottom: Math.max(insets.bottom, 12) }]}>
         <NavItem icono="📊" etiqueta="Resumen" activo={pantalla === 'resumen'} onPress={() => setPantalla('resumen')} />
         <NavItem icono="＋" etiqueta="Nuevo" activo={pantalla === 'movimientos'} onPress={abrirNuevo} />
         <NavItem icono="📋" etiqueta="Tabla" activo={pantalla === 'tabla'} onPress={() => setPantalla('tabla')} />
         <NavItem icono="📒" etiqueta="Libros" activo={pantalla === 'libros'} onPress={() => setPantalla('libros')} />
-        <NavItem icono="📦" etiqueta="Catálogo" activo={pantalla === 'productos'} onPress={() => setPantalla('productos')} />
+        <NavItem icono="📦" etiqueta="Inventario" activo={pantalla === 'productos'} badge={invAlertas.length} onPress={() => setPantalla('productos')} />
       </View>
     </SafeAreaView>
   );
@@ -1581,31 +2436,54 @@ function Boton({ texto, onPress, principal, secundario }: { texto: string; onPre
   );
 }
 
-function NavItem({ icono, etiqueta, activo, onPress }: { icono: string; etiqueta: string; activo: boolean; onPress: () => void }) {
+function NavItem({ icono, etiqueta, activo, badge, onPress }: { icono: string; etiqueta: string; activo: boolean; badge?: number; onPress: () => void }) {
   return (
     <Pressable hitSlop={12} onPress={onPress} style={styles.navItem}>
       <View style={[styles.navIconoCapsula, activo && styles.navIconoCapsulaActiva]}>
         <Text style={[styles.navIcono, activo && styles.navIconoActivo]}>{icono}</Text>
+        {!!badge && badge > 0 && (
+          <View style={styles.navBadge}>
+            <Text style={styles.navBadgeTexto}>{badge > 99 ? '99+' : badge}</Text>
+          </View>
+        )}
       </View>
       <Text style={[styles.navTexto, activo && styles.navTextoActivo]}>{etiqueta}</Text>
     </Pressable>
   );
 }
 
-function SelectorCatalogo({ productos, onSelect, onOpen, abierto }: { productos: ProductoGuardado[]; onSelect: (p: ProductoGuardado) => void; onOpen: () => void; abierto: boolean }) {
+function SelectorCatalogo({
+  productos, onSelect, onOpen, abierto, etiquetaBoton,
+}: {
+  productos: ProductoGuardado[];
+  onSelect: (p: ProductoGuardado) => void;
+  onOpen: () => void;
+  abierto: boolean;
+  etiquetaBoton?: string;
+}) {
   return (
     <View style={styles.selectorContainer}>
       <Pressable onPress={onOpen} style={styles.selectorBoton}>
-        <Text style={styles.selectorBotonTexto}>{abierto ? '▲ Ocultar catálogo rápido' : '▼ Seleccionar del catálogo'}</Text>
+        <Text style={styles.selectorBotonTexto}>
+          {abierto ? '▲ Ocultar inventario' : (etiquetaBoton || '▼ Seleccionar del inventario')}
+        </Text>
       </Pressable>
       {abierto && (
         <View style={styles.catalogoLista}>
-          {productos.length ? productos.map((prod) => (
-            <Pressable key={prod.id} onPress={() => onSelect(prod)} style={styles.catalogoItem}>
-              <Text style={styles.catalogoItemNombre}>{prod.nombre}</Text>
-              <Text style={styles.catalogoItemPrecio}>{dinero(prod.precio)}</Text>
-            </Pressable>
-          )) : <Text style={styles.catalogoVacio}>Crea productos desde la pestaña Catálogo.</Text>}
+          {productos.length ? productos.map((prod) => {
+            const est = obtenerEstadoStock(prod.cantidad_actual, prod.stock_minimo);
+            return (
+              <Pressable key={prod.id} onPress={() => onSelect(prod)} style={styles.catalogoItem}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.catalogoItemNombre}>{prod.nombre}</Text>
+                  <Text style={[styles.catalogoItemStock, est === 'agotado' ? styles.textRojo : est === 'stock_bajo' ? styles.textAmarillo : styles.textVerde]}>
+                    Stock: {prod.cantidad_actual} uds · {etiquetaEstadoStock(est)}
+                  </Text>
+                </View>
+                <Text style={styles.catalogoItemPrecio}>{dinero(prod.precio)}</Text>
+              </Pressable>
+            );
+          }) : <Text style={styles.catalogoVacio}>Crea productos desde la pestaña Inventario.</Text>}
         </View>
       )}
     </View>
@@ -1881,4 +2759,40 @@ const styles = StyleSheet.create({
   textRojo: { color: COLORES.rojo },
   textMorado: { color: COLORES.moradoClaro },
   textAmarillo: { color: COLORES.amarillo },
+
+  // Inventario (resumen, alertas, tabla tipo Excel, badges)
+  invValorTotalCard: { backgroundColor: '#1E1438', borderColor: '#3D256D', borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
+  invValorTotalLabel: { color: COLORES.textoSecundario, fontSize: 13, fontWeight: '700' },
+  invValorTotalMonto: { color: COLORES.moradoClaro, fontSize: 20, fontWeight: '900' },
+
+  alertaInvBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: COLORES.rojoFondo, borderColor: COLORES.rojoBorde, borderWidth: 1, borderRadius: 16, padding: 12, marginBottom: 14 },
+  alertaInvCaja: { backgroundColor: COLORES.amarilloFondo, borderColor: COLORES.amarilloBorde, borderWidth: 1, borderRadius: 16, padding: 12, marginBottom: 14 },
+  alertaInvTitulo: { color: COLORES.blanco, fontSize: 13, fontWeight: '800' },
+  alertaInvSub: { color: COLORES.textoSecundario, fontSize: 11, marginTop: 2 },
+  alertaInvChip: { paddingVertical: 6, paddingHorizontal: 10, borderRadius: 12, borderWidth: 1 },
+  alertaInvChipRojo: { backgroundColor: COLORES.rojoFondo, borderColor: COLORES.rojoBorde },
+  alertaInvChipAmarillo: { backgroundColor: COLORES.superficie, borderColor: COLORES.amarilloBorde },
+
+  excelWrap: { borderRadius: 14, borderWidth: 1, borderColor: COLORES.borde, backgroundColor: COLORES.tarjeta, marginBottom: 12 },
+  excelHeader: { flexDirection: 'row', backgroundColor: COLORES.moradoFondo, borderBottomWidth: 1, borderBottomColor: COLORES.moradoBorde, paddingVertical: 10, paddingHorizontal: 6 },
+  excelTh: { color: COLORES.blanco, fontSize: 11, fontWeight: '800', paddingHorizontal: 6 },
+  excelRow: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: COLORES.borde, paddingVertical: 10, paddingHorizontal: 6, backgroundColor: COLORES.tarjeta },
+  excelRowAlt: { backgroundColor: COLORES.superficie },
+  excelRowAgotado: { backgroundColor: 'rgba(244, 63, 94, 0.12)' },
+  excelRowBajo: { backgroundColor: 'rgba(245, 158, 11, 0.10)' },
+  excelTd: { color: COLORES.textoSecundario, fontSize: 12, paddingHorizontal: 6 },
+  excelTdBold: { color: COLORES.blanco, fontWeight: '700' },
+  excelNum: { textAlign: 'right' },
+
+  badgeStock: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 8, alignSelf: 'flex-start', borderWidth: 1 },
+  badgeStockOk: { backgroundColor: COLORES.verdeFondo, borderColor: COLORES.verdeBorde },
+  badgeStockBajo: { backgroundColor: COLORES.amarilloFondo, borderColor: COLORES.amarilloBorde },
+  badgeStockAgotado: { backgroundColor: COLORES.rojoFondo, borderColor: COLORES.rojoBorde },
+  badgeStockTexto: { fontSize: 10, fontWeight: '800' },
+
+  stockVinculoBox: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: COLORES.superficie, borderColor: COLORES.moradoBorde, borderWidth: 1, borderRadius: 10, padding: 10, marginTop: 4 },
+  stockVinculoTexto: { color: COLORES.textoSecundario, fontSize: 12, flex: 1 },
+  catalogoItemStock: { fontSize: 11, marginTop: 2, fontWeight: '700' },
+  navBadge: { position: 'absolute', top: -4, right: -4, backgroundColor: COLORES.rojo, borderRadius: 10, minWidth: 18, height: 18, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center' },
+  navBadgeTexto: { color: COLORES.blanco, fontSize: 9, fontWeight: '900' },
 });

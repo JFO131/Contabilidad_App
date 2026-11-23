@@ -1,11 +1,13 @@
-// Datos para el dashboard: totales, ingresos vs egresos, movimientos recientes y resumen por mes.
+// Datos para el dashboard: totales, ingresos vs egresos, movimientos recientes, resumen por mes e inventario.
 const db = require('../db');
 const { calcularTotales } = require('./movimientosServicio');
+const { obtenerResumenInventario } = require('./inventarioServicio');
 
 const redondear = (numero) => Math.round((numero ?? 0) * 100) / 100;
 
 function obtenerResumen() {
   const totales = calcularTotales();
+  const inventario = obtenerResumenInventario();
 
   // Ingresos = ventas. Egresos = compras + gastos. Los movimientos "otro" no cuentan en ninguno.
   const ingresos = totales.total_ventas;
@@ -31,6 +33,7 @@ function obtenerResumen() {
     balance: redondear(ingresos - egresos),
     recientes,
     porMes: porMes.map((m) => ({ mes: m.mes, ingresos: redondear(m.ingresos), egresos: redondear(m.egresos) })),
+    inventario,
   };
 }
 

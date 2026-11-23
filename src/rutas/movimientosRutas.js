@@ -27,32 +27,45 @@ router.get('/categorias', (req, res) => {
 });
 
 // Agregar
-router.post('/', (req, res) => {
+router.post('/', (req, res, next) => {
   const { errores, valores } = validarMovimiento(req.body);
   if (Object.keys(errores).length) return res.status(400).json(respuestaErrores(errores));
-  res.status(201).json(servicio.crear(valores));
+
+  try {
+    res.status(201).json(servicio.crear(valores));
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Editar
-router.put('/:id', (req, res) => {
+router.put('/:id', (req, res, next) => {
   const id = leerId(req, res);
   if (id === null) return;
 
   const { errores, valores } = validarMovimiento(req.body);
   if (Object.keys(errores).length) return res.status(400).json(respuestaErrores(errores));
 
-  const actualizado = servicio.actualizar(id, valores);
-  if (!actualizado) return res.status(404).json({ mensaje: 'El registro no existe.' });
-  res.json(actualizado);
+  try {
+    const actualizado = servicio.actualizar(id, valores);
+    if (!actualizado) return res.status(404).json({ mensaje: 'El registro no existe.' });
+    res.json(actualizado);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Eliminar
-router.delete('/:id', (req, res) => {
+router.delete('/:id', (req, res, next) => {
   const id = leerId(req, res);
   if (id === null) return;
 
-  if (!servicio.eliminar(id)) return res.status(404).json({ mensaje: 'El registro no existe.' });
-  res.status(204).end();
+  try {
+    if (!servicio.eliminar(id)) return res.status(404).json({ mensaje: 'El registro no existe.' });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
 });
 
 module.exports = router;

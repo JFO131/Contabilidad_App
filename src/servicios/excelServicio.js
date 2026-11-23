@@ -2,6 +2,7 @@
 const ExcelJS = require('exceljs');
 
 const ETIQUETAS_TIPO = { compra: 'Compra', venta: 'Venta', gasto: 'Gasto', otro: 'Otro' };
+const ETIQUETAS_ESTADO_STOCK = { disponible: 'Disponible', stock_bajo: 'Stock bajo', agotado: 'Agotado' };
 const FORMATO_DINERO = '"$"#,##0.00';
 const COLOR_ENCABEZADO = 'FF17694F';
 
@@ -105,4 +106,98 @@ async function generarLibroExcel(registros, totales) {
   return libro;
 }
 
-module.exports = { generarLibroExcel };
+async function generarInventarioExcel(productos, resumen, totalesFiltrados) {
+  const libro = new ExcelJS.Workbook();
+  libro.creator = 'Libro Contable';
+  libro.created = new Date();
+
+  const hoja = libro.addWorksheet('Inventario', { views: [{ state: 'frozen', ySplit: 1 }] });
+
+  hoja.columns = [
+    { header: 'Producto', key: 'nombre', width: 30 },
+    { header: 'Categoría', key: 'categoria', width: 18 },
+    { header: 'Proveedor', key: 'proveedor', width: 24 },
+    { header: 'Cantidad inicial', key: 'cantidad_inicial', width: 16 },
+    { header: 'Disponible actual', key: 'cantidad_actual', width: 16 },
+    { header: 'Stock mínimo', key: 'stock_minimo', width: 14 },
+    { header: 'Valor unitario', key: 'valor_unitario', width: 16 },
+    { header: 'Valor total', key: 'valor_total', width: 18 },
+    { header: 'Estado del stock', key: 'estado_stock', width: 16 },
+  ];
+
+  productos.forEach((p, idx) => {
+    const filaNum = idx + 2;
+    hoja.addRow({
+      nombre: p.nombre,
+      categoria: p.categoria,
+      proveedor: p.proveedor,
+      cantidad_inicial: p.cantidad_inicial,
+      cantidad_actual: p.cantidad_actual,
+      stock_minimo: p.stock_minimo,
+      valor_unitario: p.valor_unitario,
+      valor_total: { formula: `E${filaNum}*G${filaNum}`, result: p.valor_total },
+      estado_stock: ETIQUETAS_ESTADO_STOCK[p.estado_stock] ?? p.estado_stock,
+    });
+  });
+
+  const ultimaFila = productos.length + 1;
+  ['cantidad_inicial', 'cantidad_actual', 'stock_minimo'].forEach((k) => {
+    hoja.getColumn(k).numFmt = '#,##0.##';
+  });
+  hoja.getColumn('valor_unitario').numFmt = FORMATO_DINERO;
+  hoja.getColumn('valor_total').numFmt = FORMATO_DINERO;
+
+  const encabezado = hoja.getRow(1);
+  encabezado.height = 22;
+  encabezado.eachCell((celda) => {
+    celda.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    celda.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLOR_ENCABEZADO } };
+    celda.alignment = { vertical: 'middle', horizontal: 'left' };
+  });
+  ['cantidad_inicial', 'cantidad_actual', 'stock_minimo', 'valor_unitario', 'valor_total'].forEach((k) => {
+    encabezado.getCell(k).alignment = { vertical: 'middle', horizontal: 'right' };
+  });
+
+  const filaTotales = hoja.addRow({ nombre: 'TOTAL' });
+  filaTotales.getCell('cantidad_actual').value = {
+    formula: productos.length ? `SUM(E2:E${ultimaFila})` : '0',
+    result: totalesFiltrados.total_unidades,
+  };
+  filaTotales.getCell('valor_total').value = {
+    formula: productos.length ? `SUM(H2:H${ultimaFila})` : '0',
+    result: totalesFiltrados.valor_total,
+  };
+  filaTotales.eachCell({ includeEmpty: true }, (celda) => {
+    celda.font = { bold: true };
+    celda.border = { top: { style: 'medium', color: { argb: COLOR_ENCABEZADO } } };
+  });
+
+  if (productos.length) {
+    hoja.autoFilter = { from: 'A1', to: `I${ultimaFila}` };
+  }
+
+  const hojaResumen = libro.addWorksheet('Resumen Inventario');
+  hojaResumen.columns = [
+    { header: 'Indicador', key: 'indicador', width: 32 },
+    { header: 'Valor', key: 'valor', width: 20 },
+  ];
+  [
+    ['Total de productos registrados', resumen.total_productos],
+    ['Total de unidades disponibles', resumen.total_unidades],
+    ['Productos disponibles', resumen.disponibles],
+    ['Productos con stock bajo', resumen.stock_bajo],
+    ['Productos agotados', resumen.agotados],
+    ['Valor total del inventario', resumen.valor_total_inventario],
+  ].forEach(([indicador, valor]) => hojaResumen.addRow({ indicador, valor }));
+
+  hojaResumen.getRow(1).eachCell((celda) => {
+    celda.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    celda.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLOR_ENCABEZADO } };
+  });
+  hojaResumen.getRow(7).getCell('valor').numFmt = FORMATO_DINERO;
+  hojaResumen.getRow(7).font = { bold: true };
+
+  return libro;
+}
+
+module.exports = { generarLibroExcel, generarInventarioExcel };

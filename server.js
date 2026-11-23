@@ -2,8 +2,9 @@
 const path = require('path');
 const express = require('express');
 
-require('./src/db'); // Al importarlo se crea la base de datos y la tabla si no existen.
+require('./src/db'); // Al importarlo se crea la base de datos y las tablas si no existen.
 const movimientosRutas = require('./src/rutas/movimientosRutas');
+const inventarioRutas = require('./src/rutas/inventarioRutas');
 const resumenRutas = require('./src/rutas/resumenRutas');
 const exportarRutas = require('./src/rutas/exportarRutas');
 
@@ -14,6 +15,7 @@ app.use(express.json());
 
 // API: cada grupo de rutas vive en su propio archivo.
 app.use('/api/movimientos', movimientosRutas);
+app.use('/api/inventario', inventarioRutas);
 app.use('/api/resumen', resumenRutas);
 app.use('/api/exportar', exportarRutas);
 app.use('/api', (req, res) => res.status(404).json({ mensaje: 'Ruta no encontrada.' }));
@@ -29,6 +31,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Si algo falla en el servidor, respondemos con un mensaje claro en vez de romper la app.
 app.use((error, req, res, next) => {
+  if (error.status) {
+    const cuerpo = { mensaje: error.message };
+    if (error.errores) cuerpo.errores = error.errores;
+    return res.status(error.status).json(cuerpo);
+  }
   console.error(error);
   res.status(500).json({ mensaje: 'Ocurrió un error en el servidor.' });
 });

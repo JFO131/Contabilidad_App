@@ -1,18 +1,31 @@
-// El panel principal: tarjetas con totales, ingresos vs egresos, gráficos y movimientos recientes.
+// El panel principal: tarjetas con totales, ingresos vs egresos, gráficos, recientes y alertas de stock.
 import { api } from './api.js';
 import { moneda, fechaCorta, escaparHtml, ETIQUETA_TIPO } from './formato.js';
 import { mostrarAviso } from './avisos.js';
+import { actualizarBadgeInventario } from './inventario.js';
 
 const COLORES = { compra: '#3a6ea5', venta: '#2a9d68', gasto: '#d24b3e', otro: '#7c8a93' };
 
 let graficoTipos = null;
 let graficoMeses = null;
+let irAInventario = () => {};
 
 const $ = (id) => document.getElementById(id);
+
+export function iniciarDashboard(opciones = {}) {
+  irAInventario = opciones.irAInventario || (() => {});
+  const alertaBox = $('dash-alerta-inventario');
+  alertaBox.addEventListener('click', (evento) => {
+    const btn = evento.target.closest('button[data-ir-inventario]');
+    if (btn) irAInventario(btn.dataset.irInventario);
+  });
+}
 
 export async function cargarDashboard() {
   try {
     const resumen = await api.resumen();
+    dibujarAlertaInventario(resumen.inventario);
+    actualizarBadgeInventario(resumen.inventario);
     dibujarTarjetas(resumen);
     dibujarBalance(resumen);
     dibujarGraficos(resumen);
@@ -20,6 +33,34 @@ export async function cargarDashboard() {
   } catch (error) {
     mostrarAviso(error.message, 'error');
   }
+}
+
+function dibujarAlertaInventario(inv) {
+  const caja = $('dash-alerta-inventario');
+  if (!inv || (inv.agotados === 0 && inv.stock_bajo === 0)) {
+    caja.hidden = true;
+    caja.innerHTML = '';
+    return;
+  }
+
+  const hayAgotados = inv.agotados > 0;
+  caja.className = `alerta-stock ${hayAgotados ? 'alerta-stock--peligro' : ''}`;
+  caja.hidden = false;
+
+  const partes = [];
+  if (inv.agotados > 0) partes.push(`${inv.agotados} ${inv.agotados === 1 ? 'producto agotado' : 'productos agotados'}`);
+  if (inv.stock_bajo > 0) partes.push(`${inv.stock_bajo} con stock bajo`);
+
+  caja.innerHTML = `
+    <div class="alerta-stock__cabecera">
+      <span class="alerta-stock__titulo">📦 Atención en inventario: ${partes.join(' y ')}.</span>
+      <div class="alerta-stock__acciones">
+        ${inv.agotados > 0 ? '<button type="button" class="boton boton--suave boton--chico" data-ir-inventario="agotado">Ver agotados</button>' : ''}
+        ${inv.stock_bajo > 0 ? '<button type="button" class="boton boton--suave boton--chico" data-ir-inventario="stock_bajo">Ver stock bajo</button>' : ''}
+        <button type="button" class="boton boton--primario boton--chico" data-ir-inventario="">Ir a Inventario</button>
+      </div>
+    </div>
+  `;
 }
 
 function dibujarTarjetas({ totales }) {

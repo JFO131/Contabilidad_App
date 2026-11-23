@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -20,6 +21,7 @@
   <!-- Código de la aplicación -->
   <script type="module" src="js/main.js"></script>
 </head>
+
 <body>
   <div class="aplicacion">
 
@@ -32,6 +34,10 @@
       <nav class="navegacion" aria-label="Secciones">
         <button type="button" class="navegacion__boton" data-vista="dashboard">📊 Dashboard</button>
         <button type="button" class="navegacion__boton" data-vista="registros">📋 Registros</button>
+        <button type="button" class="navegacion__boton" data-vista="inventario">
+          <span>📦 Inventario</span>
+          <span id="nav-badge-inventario" class="nav-badge" hidden>0</span>
+        </button>
       </nav>
     </aside>
 
@@ -45,6 +51,8 @@
             <p class="vista__descripcion">Resumen de todos los movimientos registrados.</p>
           </div>
         </header>
+
+        <div id="dash-alerta-inventario" class="alerta-stock" hidden></div>
 
         <div class="tarjetas">
           <article class="tarjeta tarjeta--registros">
@@ -76,12 +84,14 @@
               <div class="comparacion__fila">
                 <span>Ingresos (ventas)</span>
                 <strong id="bal-ingresos">$ 0</strong>
-                <div class="comparacion__barra"><span id="barra-ingresos" class="comparacion__relleno comparacion__relleno--venta"></span></div>
+                <div class="comparacion__barra"><span id="barra-ingresos"
+                    class="comparacion__relleno comparacion__relleno--venta"></span></div>
               </div>
               <div class="comparacion__fila">
                 <span>Egresos (compras y gastos)</span>
                 <strong id="bal-egresos">$ 0</strong>
-                <div class="comparacion__barra"><span id="barra-egresos" class="comparacion__relleno comparacion__relleno--gasto"></span></div>
+                <div class="comparacion__barra"><span id="barra-egresos"
+                    class="comparacion__relleno comparacion__relleno--gasto"></span></div>
               </div>
             </div>
             <p class="balance">
@@ -94,7 +104,8 @@
           <article class="panel">
             <h2>Distribución por tipo</h2>
             <div class="grafico">
-              <canvas id="grafico-tipos" aria-label="Gráfico de distribución por tipo de movimiento" role="img"></canvas>
+              <canvas id="grafico-tipos" aria-label="Gráfico de distribución por tipo de movimiento"
+                role="img"></canvas>
               <p class="grafico__vacio" id="tipos-vacio" hidden>Aún no hay datos para graficar.</p>
             </div>
           </article>
@@ -141,7 +152,9 @@
           </label>
           <label class="campo">
             <span class="campo__etiqueta">Categoría</span>
-            <select id="filtro-categoria"><option value="">Todas</option></select>
+            <select id="filtro-categoria">
+              <option value="">Todas</option>
+            </select>
           </label>
           <label class="campo">
             <span class="campo__etiqueta">Desde</span>
@@ -179,14 +192,118 @@
                 <th scope="col" data-orden="nombre"><button type="button" class="orden">Nombre</button></th>
                 <th scope="col" data-orden="proveedor"><button type="button" class="orden">Proveedor</button></th>
                 <th scope="col" data-orden="categoria"><button type="button" class="orden">Categoría</button></th>
-                <th scope="col" data-orden="cantidad" class="num"><button type="button" class="orden">Cantidad</button></th>
-                <th scope="col" data-orden="valor_unitario" class="num"><button type="button" class="orden">Valor unitario</button></th>
-                <th scope="col" data-orden="valor_total" class="num"><button type="button" class="orden">Valor total</button></th>
+                <th scope="col" data-orden="cantidad" class="num"><button type="button" class="orden">Cantidad</button>
+                </th>
+                <th scope="col" data-orden="valor_unitario" class="num"><button type="button" class="orden">Valor
+                    unitario</button></th>
+                <th scope="col" data-orden="valor_total" class="num"><button type="button" class="orden">Valor
+                    total</button></th>
                 <th scope="col">Observaciones</th>
               </tr>
             </thead>
             <tbody id="tabla-cuerpo"></tbody>
             <tfoot id="tabla-pie"></tfoot>
+          </table>
+        </div>
+      </section>
+
+      <!-- ===== Vista: Inventario ===== -->
+      <section id="vista-inventario" class="vista" hidden>
+        <header class="vista__encabezado">
+          <div>
+            <h1>Inventario</h1>
+            <p class="vista__descripcion" id="contador-inventario" aria-live="polite">Control automático de existencias
+              conectado con los movimientos.</p>
+          </div>
+          <div class="acciones-encabezado">
+            <button type="button" id="boton-excel-inventario" class="boton boton--excel">📗 Exportar Excel</button>
+            <button type="button" id="boton-agregar-producto" class="boton boton--primario">➕ Nuevo producto</button>
+          </div>
+        </header>
+
+        <!-- Indicadores resumen del inventario -->
+        <div class="tarjetas">
+          <article class="tarjeta tarjeta--registros">
+            <span class="tarjeta__titulo">Total de productos</span>
+            <strong class="tarjeta__valor" id="inv-total-productos">0</strong>
+          </article>
+          <article class="tarjeta tarjeta--compra">
+            <span class="tarjeta__titulo">Unidades disponibles</span>
+            <strong class="tarjeta__valor" id="inv-total-unidades">0</strong>
+          </article>
+          <article class="tarjeta tarjeta--alerta">
+            <span class="tarjeta__titulo">Con stock bajo</span>
+            <strong class="tarjeta__valor" id="inv-stock-bajo">0</strong>
+          </article>
+          <article class="tarjeta tarjeta--gasto">
+            <span class="tarjeta__titulo">Agotados</span>
+            <strong class="tarjeta__valor" id="inv-agotados">0</strong>
+          </article>
+          <article class="tarjeta tarjeta--total">
+            <span class="tarjeta__titulo">Valor total inventario</span>
+            <strong class="tarjeta__valor" id="inv-valor-total">$ 0</strong>
+          </article>
+        </div>
+
+        <!-- Alertas visuales de reabastecimiento -->
+        <div id="inv-alertas" class="alerta-stock" hidden></div>
+
+        <!-- Barra de búsqueda y filtros del inventario -->
+        <div class="barra-filtros barra-filtros--inventario" role="search">
+          <label class="campo campo--buscar">
+            <span class="campo__etiqueta">🔍 Buscar producto</span>
+            <input type="search" id="inv-filtro-buscar" placeholder="Nombre, categoría o proveedor" autocomplete="off">
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Categoría</span>
+            <select id="inv-filtro-categoria">
+              <option value="">Todas</option>
+            </select>
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Proveedor</span>
+            <select id="inv-filtro-proveedor">
+              <option value="">Todos</option>
+            </select>
+          </label>
+          <label class="campo">
+            <span class="campo__etiqueta">Estado del stock</span>
+            <select id="inv-filtro-estado">
+              <option value="">Todos</option>
+              <option value="disponible">Disponible</option>
+              <option value="stock_bajo">Stock bajo</option>
+              <option value="agotado">Agotado</option>
+            </select>
+          </label>
+          <button type="button" id="inv-boton-limpiar" class="boton boton--suave">Limpiar filtros</button>
+        </div>
+
+        <!-- Tabla tipo Excel del inventario -->
+        <div class="hoja">
+          <table class="tabla" id="tabla-inventario">
+            <thead>
+              <tr>
+                <th scope="col" class="celda-indice"><span class="visualmente-oculto">Número de fila</span></th>
+                <th scope="col" class="acciones">Acciones</th>
+                <th scope="col" data-orden-inv="nombre"><button type="button" class="orden">Producto</button></th>
+                <th scope="col" data-orden-inv="categoria"><button type="button" class="orden">Categoría</button></th>
+                <th scope="col" data-orden-inv="proveedor"><button type="button" class="orden">Proveedor</button></th>
+                <th scope="col" data-orden-inv="cantidad_inicial" class="num"><button type="button" class="orden">Cant.
+                    inicial</button></th>
+                <th scope="col" data-orden-inv="cantidad_actual" class="num"><button type="button"
+                    class="orden">Disponible</button></th>
+                <th scope="col" data-orden-inv="stock_minimo" class="num"><button type="button" class="orden">Stock
+                    mín.</button></th>
+                <th scope="col" data-orden-inv="valor_unitario" class="num"><button type="button" class="orden">Valor
+                    unitario</button></th>
+                <th scope="col" data-orden-inv="valor_total" class="num"><button type="button" class="orden">Valor
+                    total</button></th>
+                <th scope="col" data-orden-inv="estado_stock"><button type="button" class="orden">Estado del
+                    stock</button></th>
+              </tr>
+            </thead>
+            <tbody id="inv-tabla-cuerpo"></tbody>
+            <tfoot id="inv-tabla-pie"></tfoot>
           </table>
         </div>
       </section>
@@ -202,6 +319,16 @@
 
       <div class="dialogo__cuerpo formulario">
         <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="campo-producto">Producto del inventario (opcional — sincroniza stock
+            automáticamente)</label>
+          <select id="campo-producto" name="producto_id">
+            <option value="">Sin vincular a un producto de inventario</option>
+          </select>
+          <div id="info-stock-movimiento" class="info-stock" hidden></div>
+          <small class="campo__error" data-error-de="producto_id"></small>
+        </div>
+
+        <div class="campo campo--completo">
           <label class="campo__etiqueta" for="campo-nombre">Nombre del producto o elemento *</label>
           <input id="campo-nombre" name="nombre" type="text" maxlength="150" autocomplete="off">
           <small class="campo__error" data-error-de="nombre"></small>
@@ -211,8 +338,8 @@
           <label class="campo__etiqueta" for="campo-tipo">Tipo de movimiento *</label>
           <select id="campo-tipo" name="tipo">
             <option value="">Elige un tipo</option>
-            <option value="compra">Compra</option>
-            <option value="venta">Venta</option>
+            <option value="compra">Compra (aumenta stock)</option>
+            <option value="venta">Venta (disminuye stock)</option>
             <option value="gasto">Gasto</option>
             <option value="otro">Otro</option>
           </select>
@@ -225,6 +352,14 @@
           <small class="campo__error" data-error-de="fecha"></small>
         </div>
 
+        <div class="campo campo--completo campo-check" id="campo-afecta-inventario-wrap" hidden>
+          <label class="check-label">
+            <input type="checkbox" id="campo-afecta-inventario" name="afecta_inventario">
+            <span>Este movimiento corresponde a una <strong>salida de productos del inventario</strong> (descontará
+              existencias)</span>
+          </label>
+        </div>
+
         <div class="campo">
           <label class="campo__etiqueta" for="campo-proveedor">Proveedor</label>
           <input id="campo-proveedor" name="proveedor" type="text" maxlength="150" autocomplete="off">
@@ -233,7 +368,8 @@
 
         <div class="campo">
           <label class="campo__etiqueta" for="campo-categoria">Categoría</label>
-          <input id="campo-categoria" name="categoria" type="text" maxlength="80" list="lista-categorias" autocomplete="off">
+          <input id="campo-categoria" name="categoria" type="text" maxlength="80" list="lista-categorias"
+            autocomplete="off">
           <datalist id="lista-categorias"></datalist>
           <small class="campo__error" data-error-de="categoria"></small>
         </div>
@@ -269,6 +405,133 @@
     </form>
   </dialog>
 
+  <!-- ===== Ventana: crear / editar producto del inventario ===== -->
+  <dialog id="dialogo-producto" class="dialogo" aria-labelledby="titulo-producto">
+    <form id="formulario-producto" novalidate>
+      <header class="dialogo__encabezado">
+        <h2 id="titulo-producto">Nuevo producto</h2>
+      </header>
+
+      <div class="dialogo__cuerpo formulario">
+        <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="prod-nombre">Nombre del producto *</label>
+          <input id="prod-nombre" name="nombre" type="text" maxlength="150" autocomplete="off">
+          <small class="campo__error" data-error-prod="nombre"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="prod-categoria">Categoría</label>
+          <input id="prod-categoria" name="categoria" type="text" maxlength="80" list="lista-categorias-inv"
+            autocomplete="off">
+          <datalist id="lista-categorias-inv"></datalist>
+          <small class="campo__error" data-error-prod="categoria"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="prod-proveedor">Proveedor</label>
+          <input id="prod-proveedor" name="proveedor" type="text" maxlength="150" autocomplete="off">
+          <small class="campo__error" data-error-prod="proveedor"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="prod-cantidad-inicial">Cantidad inicial *</label>
+          <input id="prod-cantidad-inicial" name="cantidad_inicial" type="number" step="any" min="0"
+            inputmode="decimal">
+          <small class="campo__error" data-error-prod="cantidad_inicial"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="prod-stock-minimo">Stock mínimo de alerta *</label>
+          <input id="prod-stock-minimo" name="stock_minimo" type="number" step="any" min="0" inputmode="decimal">
+          <small class="campo__error" data-error-prod="stock_minimo"></small>
+        </div>
+
+        <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="prod-valor-unitario">Valor unitario *</label>
+          <input id="prod-valor-unitario" name="valor_unitario" type="number" step="any" min="0" inputmode="decimal">
+          <small class="campo__error" data-error-prod="valor_unitario"></small>
+        </div>
+
+        <div class="campo campo--completo total-calculado">
+          <span class="campo__etiqueta">Valor estimado del stock inicial</span>
+          <output id="prod-valor-preview">—</output>
+        </div>
+      </div>
+
+      <footer class="dialogo__pie">
+        <button type="button" id="boton-cancelar-producto" class="boton boton--suave">Cancelar</button>
+        <button type="submit" id="boton-guardar-producto" class="boton boton--primario">Guardar producto</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- ===== Ventana: entrada / salida manual de inventario ===== -->
+  <dialog id="dialogo-ajuste" class="dialogo dialogo--mediano" aria-labelledby="titulo-ajuste">
+    <form id="formulario-ajuste" novalidate>
+      <header class="dialogo__encabezado">
+        <h2 id="titulo-ajuste">Entrada / Salida manual</h2>
+      </header>
+
+      <div class="dialogo__cuerpo formulario">
+        <div class="campo campo--completo">
+          <div id="ajuste-producto-info" class="info-stock"></div>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="ajuste-tipo">Tipo de movimiento *</label>
+          <select id="ajuste-tipo" name="tipo">
+            <option value="entrada">Entrada (+ aumenta stock)</option>
+            <option value="salida">Salida (− disminuye stock)</option>
+          </select>
+          <small class="campo__error" data-error-ajuste="tipo"></small>
+        </div>
+
+        <div class="campo">
+          <label class="campo__etiqueta" for="ajuste-cantidad">Cantidad *</label>
+          <input id="ajuste-cantidad" name="cantidad" type="number" step="any" min="0" inputmode="decimal">
+          <small class="campo__error" data-error-ajuste="cantidad"></small>
+        </div>
+
+        <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="ajuste-fecha">Fecha *</label>
+          <input id="ajuste-fecha" name="fecha" type="date">
+          <small class="campo__error" data-error-ajuste="fecha"></small>
+        </div>
+
+        <div class="campo campo--completo">
+          <label class="campo__etiqueta" for="ajuste-motivo">Motivo *</label>
+          <textarea id="ajuste-motivo" name="motivo" rows="3" maxlength="300"
+            placeholder="Ej. Conteo físico, merma, reposición manual, devolución..."></textarea>
+          <small class="campo__error" data-error-ajuste="motivo"></small>
+        </div>
+
+        <div class="campo campo--completo total-calculado">
+          <span class="campo__etiqueta">Stock resultante estimado</span>
+          <output id="ajuste-stock-preview">—</output>
+        </div>
+      </div>
+
+      <footer class="dialogo__pie">
+        <button type="button" id="boton-cancelar-ajuste" class="boton boton--suave">Cancelar</button>
+        <button type="submit" id="boton-guardar-ajuste" class="boton boton--primario">Registrar movimiento</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- ===== Ventana: historial de movimientos de un producto ===== -->
+  <dialog id="dialogo-historial" class="dialogo" aria-labelledby="titulo-historial">
+    <header class="dialogo__encabezado">
+      <h2 id="titulo-historial">Historial de inventario</h2>
+    </header>
+    <div class="dialogo__cuerpo">
+      <div id="historial-resumen" class="info-stock" style="margin-bottom: 1rem;"></div>
+      <div id="historial-contenido"></div>
+    </div>
+    <footer class="dialogo__pie">
+      <button type="button" id="boton-cerrar-historial" class="boton boton--primario">Cerrar</button>
+    </footer>
+  </dialog>
+
   <!-- ===== Ventana: confirmar eliminación ===== -->
   <dialog id="dialogo-confirmar" class="dialogo dialogo--pequeno" aria-labelledby="confirmar-titulo">
     <form method="dialog">
@@ -280,7 +543,8 @@
       </div>
       <footer class="dialogo__pie">
         <button type="submit" value="cancelar" class="boton boton--suave">Cancelar</button>
-        <button type="submit" value="confirmar" id="confirmar-aceptar" class="boton boton--peligro">🗑️ Eliminar</button>
+        <button type="submit" value="confirmar" id="confirmar-aceptar" class="boton boton--peligro">🗑️
+          Eliminar</button>
       </footer>
     </form>
   </dialog>
@@ -288,4 +552,5 @@
   <!-- Mensajes breves (guardado, error, etc.) -->
   <div id="avisos" class="avisos" role="status" aria-live="polite"></div>
 </body>
+
 </html>

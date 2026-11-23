@@ -2,6 +2,20 @@
 
 export const ETIQUETA_TIPO = { compra: 'Compra', venta: 'Venta', gasto: 'Gasto', otro: 'Otro' };
 
+export const ETIQUETA_ESTADO_STOCK = {
+  disponible: 'Disponible',
+  stock_bajo: 'Stock bajo',
+  agotado: 'Agotado',
+};
+
+export const ETIQUETA_ORIGEN_INV = {
+  compra: 'Compra',
+  venta: 'Venta',
+  gasto: 'Gasto (salida)',
+  otro: 'Otro (salida)',
+  ajuste_manual: 'Ajuste manual',
+};
+
 const formatoMoneda = new Intl.NumberFormat('es-CO', {
   style: 'currency',
   currency: 'COP',
@@ -19,6 +33,7 @@ export const numero = (valor) => formatoNumero.format(valor ?? 0);
 
 // "2026-09-20" -> "20/09/2026"
 export function fechaCorta(fechaISO) {
+  if (!fechaISO) return '—';
   const [anio, mes, dia] = fechaISO.split('-');
   return `${dia}/${mes}/${anio}`;
 }
